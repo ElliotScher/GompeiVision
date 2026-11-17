@@ -1,0 +1,23 @@
+# Stage 1: Latency baseline and golden models
+
+## Goal
+
+Measure the CPU pipeline's real latency, and turn its code into golden models and datasets that the FPGA blocks are tested against.
+
+## Deliverables
+
+- **LED latency rig:** robot code toggles an LED in view of the camera and logs the time; the vision output timestamp is compared with the toggle time. Works for both CPU and FPGA systems.
+- Measured exposure-to-robot latency and jitter (median, p95, p99) for the CPU pipeline at the competition resolution and FPS, recorded in this doc.
+- Recorded datasets: raw frames plus CPU detections and poses, from practice fields and match-like motion (still, driving, fast turns), stored outside git with a manifest in `model/datasets/`.
+- `model/`: C++ golden models for the threshold, connected components, quad fit, decode, refinement and PnP steps, built from [`src/`](../../src/) and the AprilTag library, with an option to dump intermediate results at each step.
+- A replay tool: run any dataset through the models and diff the result against the CPU output.
+
+## Exit criteria
+
+- [ ] Latency numbers for the CPU system measured and written down.
+- [ ] Golden models reproduce the CPU pipeline's detections and poses on all datasets (identical IDs and corners; poses within a stated tolerance).
+- [ ] Intermediate-step dumps exist for every block that Stage 4 will build.
+
+## Risks
+
+- The AprilTag library uses floating point and threads in places; the golden model may need a deterministic single-threaded configuration.

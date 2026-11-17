@@ -1,141 +1,167 @@
 # GompeiVision
 ![logo](logo3.png)
 
-GompeiVision is the in-house, custom vision solution developed by FRC Team 190, Gompei and the H.E.R.D.
+**A self-contained, FPGA-accelerated vision coprocessor for FRC, built by Team 190, Gompei and the H.E.R.D.**
+
+> **Status:** pre-alpha (planning). Nothing in this README is ready to use yet. The CPU pipeline in [`src/`](src/) (documented in [docs/legacy-cpu-pipeline.md](docs/legacy-cpu-pipeline.md)) is still our competition system. See [Roadmap and status](#roadmap-and-status).
+
+## What GompeiVision is and why it exists
+
+COTS vision units like Limelight, and our own CPU version of GompeiVision, follow the same pattern: a USB or MIPI camera fills a frame buffer, a general-purpose CPU wakes up, copies the whole frame, and only then starts looking for AprilTags. That means at least one full frame of transfer delay, plus processing time that changes from frame to frame with OS scheduling, cache misses and the number of tags in view.
+
+GompeiVision runs on an **SoC FPGA**: one chip with FPGA logic, real-time cores and a Linux-capable ARM CPU sharing the same memory. The latency-critical work (camera capture, AprilTag detection, pose solving, MCL) runs in **hardware and on real-time cores**. Pixels are processed as they come off the sensor, so a tag's corners are found a millisecond or two after the last row of the tag is read out. The heavier, irregular work (object detection, TagSLAM, VSLAM, networking) runs on the **ARM CPU under Linux**, where we can use normal C++, WPILib's `ntcore` and existing libraries. The unit talks to the robot over the same NetworkTables contract we use today.
+
+What we expect to gain, in order of importance:
+
+1. **Deterministic, low-jitter latency.** The tag path has a fixed timing budget, so the time from exposure to measurement is nearly constant and can be compensated exactly on the robot.
+2. **Exact hardware timestamps.** The FPGA triggers the sensor and records the start of exposure in hardware. No guessing from a driver callback.
+3. **Lower absolute latency.** We estimate exposure + readout + ~2–3 ms, compared with an estimated 20–40 ms for the USB/CPU path. Both figures get *measured* in Stage 1 before we believe them.
+4. **More cameras and higher FPS per unit**, with hardware-synchronized stereo pairs.
+
+## Is this feasible?
+
+**Yes.** Each block runs on the part of the chip that suits it, so nothing has to be forced into hardware:
+
+| Feature | Runs on | Notes |
+|---|---|---|
+| Camera capture, timestamps, frame routing | FPGA logic | MIPI CSI-2 receive, hardware trigger and timestamping are what FPGAs do best |
+| AprilTag (36h11) detection | FPGA logic | Streaming threshold → connected components → quad fit → decode. The main latency win and the hardest custom hardware |
+| Pose estimation (IPPE, SQPnP, tag angles, stereo) | Real-time cores | Tiny numeric problems; well under 1 ms, with no Linux scheduling in the way |
+| MCL | FPGA logic + real-time cores | Scoring thousands of particles in parallel suits hardware |
+| Object detection | Prebuilt accelerator in FPGA logic, run from Linux | AMD's neural-network accelerator (Vitis AI DPU), used like a library. No custom accelerator to build |
+| TagSLAM, VSLAM, object localization | ARM CPU (Linux) | Iterative, memory-heavy work. VSLAM can build on existing open-source SLAM code |
+| NetworkTables, config, maps, setup stream | ARM CPU (Linux) | Uses WPILib's real `ntcore` library |
+
+The real risks are not technical limits. They are **people and time**: HDL skills are rare on student teams, the AprilTag hardware takes several months to a season, and debugging hardware is slower than debugging C++. The full analysis, latency budget and risk register are in [docs/PLAN.md](docs/PLAN.md).
+
+## Design principles
+
+- **Stream, don't buffer.** The tag path never waits for a full frame. Blocks pass pixels and detections over AXI-Stream as they're produced.
+- **Hardware for the fast path, Linux for the rest.** The tag path is FPGA logic plus real-time cores. Linux only handles the final publish step on that path, in a real-time thread.
+- **Same contract as today.** The unit speaks the NetworkTables topics the CPU version uses (`/cameras/<hardware_id>/config`, `/field/tag_N`, `/cameras/<hardware_id>/output/observations`), so robot code doesn't change.
+- **Golden-model parity.** Every hardware block has a C++ reference model (starting from the code in [`src/`](src/)). Simulations must match it bit for bit, or within a documented tolerance for floating-point work.
+- **Measure before claiming.** Latency numbers in these docs are estimates until a stage's test rig measures them.
+- **Independent pipelines.** Each camera pipeline and estimator can fail or be restarted without affecting the others. A crash in a Linux process never stops tag detection.
+
+## Where each block runs
+
+The SoC FPGA has three kinds of compute, all sharing the same DDR memory:
+
+1. **FPGA logic (PL).** Capture, timestamps, frame routing, AprilTag detection, MCL particle scoring, optional FAST/ORB features for VSLAM, and the object-detection accelerator.
+2. **Real-time cores (RPU, Cortex-R5F, no Linux).** Pose solving (PnP, tag angles, stereo PnP), MCL resampling, and passing finished tag measurements to the publisher.
+3. **Application CPU (APU, Cortex-A53, Linux).** NetworkTables via `ntcore`, config and field layout, object-detection control and localization, TagSLAM, VSLAM back end, map storage and the setup-mode stream.
+
+Rules:
+
+- **The tag path never waits on ordinary Linux work.** It only reaches Linux for the final publish, in a high-priority real-time thread. Measurement *time* always comes from the hardware exposure timestamp, so delivery jitter never corrupts it.
+- **If publish jitter is measured too high, the tag path gets its own network path:** a small Ethernet MAC in the FPGA logic, driven by the real-time cores, sending a raw-UDP fast path.
+- **Every block exchanges messages in one versioned format** (the FrameBus messages), passed through shared memory. Blocks can move between tiers without changes upstream or downstream.
+- **A block moves only after a stage measures it missing its budget**, and the stage doc records the measurement.
+
+## Architecture
+
+This maps the macro design in [`GompeiVisionStructureDiagram.dot`](GompeiVisionStructureDiagram.dot) onto the chip. `[PL]` is FPGA logic, `[RPU]` the real-time cores, `[APU]` the Linux CPU.
+
+```
+ MIPI CSI-2 sensors (mono / hardware-synced stereo, global shutter)
+        │  trigger + exposure strobe
+        ▼
+┌───────────────────────── SoC FPGA (e.g. Zynq UltraScale+) ─────────────────────────┐
+│ [PL] Capture: CSI-2 RX · exposure timestamp · line buffers                         │
+│        │                                                                           │
+│ [PL] FrameBus: AXI-Stream router ──► shared DDR frame store                        │
+│        │                                                                           │
+│        ├─► [PL] AprilTag: threshold → CCL → quads → decode ─► [RPU] PnP, angles,   │
+│        │                                                       stereo PnP ──┐      │
+│        ├─► [PL] MCL particle scoring ─► [RPU] resampling ─► MCL pose ───────┤      │
+│        ├─► [PL] DPU accelerator ◄─ [APU] object detection + localization ───┤      │
+│        └─► [PL] FAST/ORB (optional) ─► [APU] VSLAM back end, geometric map ─┤      │
+│                                        [APU] TagSLAM ─► refined tag map ────┤      │
+│                                                                             ▼      │
+│ [APU] Linux: ntcore publisher (real-time thread) · config · field layout          │
+│              map storage (SD/eMMC) · setup-mode stream                             │
+└──────────────────────────────────────┬─────────────────────────────────────────────┘
+                                       │ GbE
+                                       ▼
+   Robot radio ─► roboRIO / SystemCore: RobotState
+                  ◄─ RobotData (heading, module positions, tag map)
+```
+
+## Repository layout (planned)
+
+- [`src/`](src/): the current CPU pipeline (C++, OpenCV, AprilTag, ntcore). Still the competition system, the starting point for the golden models, and the first thing we run on the new board's ARM cores.
+- `model/`: C++ golden reference models for each hardware block, plus a frame-replay harness.
+- `rtl/`: SystemVerilog for the FPGA logic (capture, FrameBus, AprilTag, MCL scoring, features).
+- `sim/`: Verilator + cocotb testbenches that compare RTL with `model/` on recorded frames.
+- `platform/`: Vivado block design, device tree, and the Linux image build.
+- `rpu/`: real-time core firmware (FreeRTOS or bare metal, OpenAMP/RPMsg): PnP, MCL resampling.
+- `apu/`: Linux C++ apps: NT publisher, config, object detection, TagSLAM, VSLAM, storage, setup stream.
+- `ml/`: object-detection datasets, training and quantization scripts.
+- `hardware/`: custom carrier board (KiCad) and enclosure (FreeCAD).
+- `scripts/`: `bootstrap.sh` and `doctor.sh` for toolchain setup and checks.
+- `tools/versions.env`: pinned toolchain versions.
+- [`docs/`](docs/): [the plan](docs/PLAN.md), [stage specs](docs/stages/README.md) and [the legacy CPU docs](docs/legacy-cpu-pipeline.md).
+
+## Hardware summary (target)
+
+The exact parts get confirmed in Stage 0b. The criteria and candidates are in [docs/PLAN.md](docs/PLAN.md#hardware).
+
+- **SoC FPGA:** AMD Zynq UltraScale+ MPSoC (quad Cortex-A53, dual Cortex-R5F, FPGA logic, shared DDR4). We prototype on an off-the-shelf **Kria K26** system-on-module and dev kit, and later design our own small carrier board for the same module.
+- **Cameras:** global-shutter MIPI CSI-2 sensors. Monochrome (OV9281-class) for AprilTags; color global shutter (AR0234-class) for object detection. Stereo pairs share a hardware trigger.
+- **Networking:** Gigabit Ethernet to the robot radio.
+- **Storage:** eMMC/microSD for the Linux image, config, network weights and saved maps.
+- **Power:** robot 12 V through a regulator with a fuse/breaker on the PDH, following the current FRC game manual.
+
+## Development setup
+
+Not available yet. Stage 0a will add `scripts/bootstrap.sh` and `scripts/doctor.sh` to install and check:
+
+- AMD Vivado and Vitis (free tier), and the Linux image tooling (PetaLinux/Yocto, or the vendor Ubuntu image for Kria)
+- Vitis AI (in its Docker container) for the object-detection model
+- Verilator, cocotb and Python 3 for simulation
+- AArch64 Linux and ARM bare-metal cross-compilers
+- CMake and a host C++ compiler for `model/` and the legacy pipeline
+
+The legacy CPU pipeline still builds as before, inside the X86 or ARM Docker containers ([`Dockerfile.X86`](Dockerfile.X86), [`Dockerfile.ARM`](Dockerfile.ARM)), and packages as a `.deb`.
+
+## Roadmap and status
+
+The full plan is in [docs/PLAN.md](docs/PLAN.md), with per-stage detail in [docs/stages/](docs/stages/README.md).
+
+- [ ] **0a**: Dev environment and toolchain checks
+- [ ] **0b**: Hardware confirmation, repo scaffolding and simulation CI
+- [ ] **1**: Latency baseline of the CPU system and golden models
+- [ ] **2**: Platform bring-up: Linux, ntcore, real-time cores, shared memory
+- [ ] **3**: Camera capture, hardware timestamps, FrameBus, setup-mode stream
+- [ ] **4**: Streaming AprilTag detector in FPGA logic
+- [ ] **5**: Pose estimation and **MVP: output parity with the CPU pipeline**
+- [ ] **6**: Multiple cameras and hardware-synced stereo
+- [ ] **7**: Object detection (DPU) and object localization
+- [ ] **8**: TagSLAM and refined tag map storage
+- [ ] **9**: MCL localization
+- [ ] **10**: VSLAM
+- [ ] **11**: Custom carrier board, enclosure and competition hardening
 
 ## Inspiration
 
-The development of GompeiVision was heavily inspired by the fantastic work done by FRC Team 6328, Mechanical Advantage, on their vision system, **[Northstar](https://github.com/Mechanical-Advantage/RobotCode2025Public/tree/main/northstar)**. We are grateful for the ideas and inspiration they have shared with the FRC community.
+GompeiVision was heavily inspired by FRC Team 6328, Mechanical Advantage, and their vision system **[Northstar](https://github.com/Mechanical-Advantage/RobotCode2025Public/tree/main/northstar)**, along with their [computer vision conference talk](https://www.youtube.com/watch?v=fwEUqL_waPk&list=PLkZ6_Ld1x9Y-vRuH1q1Nt6vXIk8j2np7P&index=5). We are grateful for the ideas they have shared with the FRC community.
 
-## A Note to Other FRC Teams
+## A note to other FRC teams
 
-While we are proud to share our code with the community, Please keep the following in mind:
+We are proud to share this work, but please keep in mind:
 
-*   **Highly Customized:** GompeiVision is built for our specific robots, sensors, and programming framework. It is not a general-purpose solution and would likely require significant modification to work on other robots.
-*   **Unsupported:** Our team's focus during the build and competition season is on our own robot. Therefore, we **cannot guarentee any support, answer questions, or accept feature requests** for this project.
+- **Highly customized:** GompeiVision is built for our robots, sensors and software framework. It is not a general-purpose solution.
+- **Unsupported:** during build and competition season our focus is our own robot. We **can't guarantee support, answer questions or accept feature requests**.
 
-You are absolutely welcome to fork this repository and adapt it for your own needs. However, please be aware that you will be responsible for implementing, debugging, and maintaining your version.
+You're welcome to fork this repository and adapt it, but you'll be responsible for implementing, debugging and maintaining your version.
 
-## Recommended Alternatives
+## Recommended alternatives
 
-For teams looking for a robust, well-supported, and community-tested vision solution, we highly recommend the following excellent options:
+For a robust, well-supported, community-tested vision solution, we recommend:
 
-*   **[Limelight](https://limelightvision.io/)**: A plug-and-play vision solution that is very popular in FRC.
-*   **[PhotonVision](https://photonvision.org/)**: A powerful, open-source vision software that runs on a variety of hardware.
+- **[Limelight](https://limelightvision.io/)**: a popular plug-and-play vision camera for FRC.
+- **[PhotonVision](https://photonvision.org/)**: powerful open-source vision software that runs on many coprocessors.
 
-These projects have dedicated communities and support channels to help you succeed.
+## License
 
-## Philosophy, Goals, and Requirements
-Yet again, inspired by FRC 6328's [computer vision conference](https://www.youtube.com/watch?v=fwEUqL_waPk&list=PLkZ6_Ld1x9Y-vRuH1q1Nt6vXIk8j2np7P&index=5), FRC 190 designed GompeiVision with a 'top-down' strategy. Here are our particular goals:
-
-### High-Level Goals:
-* Score game pieces quickly, with both high accuracy and precision using automatic alignment
-* Play auxiliary roles (e.g. feeding notes 2024)
-* Execute match play with high reliability
-
-### GompeiVision Functional Requirements:
-* Quick, accurate, and precise apriltag alignment
-* Imprecise global localization, (for use with zoning **not precise alignment**)
-* Cost less than other COTS vision systems
-
-### GompeiVision System Requirements
-* Must capture, process and transmit frames quickly enough to keep up with the rest of the robot for automatic alignment.
-* Must have enough range to see apriltags from across the field, so the robot can localize in dead-zones
-
-## Hardware Overview
-
-We defined our hardware requirements to line up with our system requirements:
-* Camera and coprocessor must operate at >50 FPS to maintain a performance gain over out current COTS vision system
-* Camera must have >=1280x720 resolution, this is FRC 190's previous COTS vision system resolution
-* Camera must transmit uncompressed (YUYV) frames over USB 3 to avoid MJPEG compression artifacts and unnecessary performance overhead
-
-### FRC 190 Standard Hardware
-
-* **Development Coprocessor: Orange Pi 5**
-  *   The Orange Pi 5 is a common board used for FRC vision, and provides sufficient power for high-framerate, multi-tag detection with low latency **on one camera**.
-* **Competition Coprocessor: Beelink SEi13**
-  *   The Beelink mini PC provides ample processing power, and allows for processing multiple (4-5) camera streams in parallel.
-* **Camera: ThriftyCam**
-  *   This monochrome camera is global shutter, which is critical for capturing crisp, motion-blur-free images of AprilTags while the robot is in motion. This camera is also equipped for USB 3.0 data transmission
-
-FRC 190 doesn't standardize lens FOV because the FOV we need to run on the cameras really depends on the utility of the camera. The 80-90 degree lenses are good for global localization, because it has the high FOV, but for specific applications we may need a lower FOV (e.g. looking at a specific tag)
-
-### Other Hardware
-While GompeiVision is not constrained to the selected hardware above, FRC 190 standardized hardware for the following reasons:
-*   **Consistency:** Ensures predictable performance and behavior across all our robots (competition, practice, and development).
-*   **Simplified Maintenance:** Allows us to maintain a small pool of pre-configured spares, enabling rapid swaps during competitions.
-*   **Focused Optimization:** Lets us fine-tune our software for a specific set of components, maximizing performance without needing to support a wide range of hardware.
-
-### A Note About USB Cameras:
-The ThriftyCam that we used does not provide the user with a serial number. Because of this, FRC 190 had to match cameras based on USB port, which added some additional work locally on the coprocessor. [See here](https://unix.stackexchange.com/questions/77170/how-to-bind-v4l2-usb-cameras-to-the-same-device-names-even-after-reboot).
-
-## Software Overview
-
-GompeiVision was designed with modularity and scalability in mind, as FRC 190 has dynamically changing software requirements. Future implementations of calibration routines, and object tracking are possibilities that we need to design for. The software is comprised of 5 major parts:
-
-### Application Entry
-*   [**`main.cpp`**](src/cpp/main.cpp): The primary entry point for the application. Its sole responsibilities are to initialize the `PipelineManager`, start all vision pipelines, and then wait for a shutdown signal, which then orchestrates a graceful shutdown, ensuring all child processes are terminated cleanly.
-*   [**`PipelineManager.cpp`**](src/cpp/pipeline/PipelineManager.cpp): The central orchestrator of the vision system. This singleton class is responsible for discovering cameras by scanning `/dev/`, forking an isolated child process for each camera, monitoring the health of these processes with a heartbeat, and ensuring their graceful shutdown. It handles all low-level process management.
-*   [**`PipelineProcess.cpp`**](src/cpp/pipeline/PipelineProcess.cpp): A standalone executable that runs as a child process, one for each camera. It is responsible for initializing and running a single `Pipeline` instance, establishing its own connection to NetworkTables, and signaling its readiness back to the `PipelineManager` via a pipe. This encapsulation ensures that a crash in one camera's processing does not affect the main manager or other camera streams.
-
-### Capture
-
-The capture component is responsible for interfacing directly with the physical camera hardware, acquiring raw image frames, and providing them to the processing pipeline.
-
-*   [**`Camera.cpp`**](src/cpp/capture/Camera.cpp): This class encapsulates all interactions with a single camera. It is built on top of OpenCV's `VideoCapture` library, specifically utilizing the `V4L2` (Video4Linux2) backend for more direct and reliable control over camera properties on Linux-based coprocessors.
-    *   **Initialization**: Upon creation, it opens a connection to the camera using its device path (e.g., `/dev/video0`).
-    *   **Frame Acquisition**: The `getFrame()` method retrieves the latest image from the camera sensor. To support latency calculation and synchronization, it also captures a high-resolution timestamp the moment the frame is read.
-    *   **Manual Control**: The class exposes methods to manually adjust camera settings, such as `setExposure()` and `setBrightness()`, allowing for fine-tuning based on lighting conditions.
-    *   **Robustness**: It includes checks to ensure the camera is connected before attempting operations and gracefully releases the camera hardware in its destructor, preventing device conflicts.
-
-### Processing
-Once a frame is captured, it enters the processing pipeline where the raw pixels are turned into meaningful data for the robot. This stage is composed of several distinct steps, from detecting the tags to estimating different types of geometric information from them.
-
-*   [**`FiducialDetector.cpp`**](src/cpp/detector/FiducialDetector.cpp): This is the first step in the vision pipeline. It takes a raw image frame from the `Camera` and uses the standard AprilTag C library to perform the core detection.
-    *   **Grayscale Conversion**: The incoming frame is first converted to grayscale, which is the format required by the detector.
-    *   **Detection**: It runs the AprilTag algorithm (using the `36h11` family) to find all visible tags in the frame.
-    *   **Data Extraction**: For each successful detection, it extracts the tag's unique ID and the pixel coordinates of its four corners. It performs a crucial remapping of these corners to ensure a consistent order (Top-Left, Top-Right, Bottom-Right, Bottom-Left) for all downstream processing. The result is a `FiducialImageObservation`.
-
-*   [**`TagAngleCalculator.cpp`**](src/cpp/estimator/TagAngleCalculator.cpp): This estimator calculates information used primarily for robot alignment and aiming. For each tag identified by the detector, it computes its distance and the viewing angles to its corners.
-    *   **Distance Estimation**: It uses OpenCV's `solvePnPGeneric` function with the `IPPE_SQUARE` method to perform a single-tag pose estimate. This method yields two possible poses; the calculator selects the one with the lower reprojection error and uses its translation component to determine the distance to the tag.
-    *   **Angle Calculation**: To accurately calculate viewing angles, it first undistorts the raw corner pixels using the camera's calibration matrix. These corrected points are then converted from 2D pixel space into 3D vectors in the camera's coordinate system, from which the horizontal and vertical angles are derived.
-
-*   [**`CameraPoseEstimator.cpp`**](src/cpp/estimator/CameraPoseEstimator.cpp): This is the primary localization engine. Its goal is to determine the camera's (and thus the robot's) absolute pose on the field by using the detected AprilTags as known reference points.
-    *   **Multi-Tag Pose Estimation**: When two or more known tags are visible, it aggregates all their corner points (both 2D image points and 3D field-relative points from a layout map) and uses OpenCV's `solvePnPGeneric` with the robust `SQPNP` solver. This provides a single, stable estimate of the field's pose relative to the camera, which is then inverted to get the camera's pose on the field.
-    *   **Single-Tag Pose Estimation**: If only one tag is visible, it falls back to the `IPPE_SQUARE` solver. This results in two ambiguous poses. Both potential poses are sent to the robot, where they can be disambiguated using other data (like odometry) to determine the true location.
-
-### IO
-The IO component is the bridge between the coprocessor and the RoboRIO, handling all communication over NetworkTables. It is responsible for receiving configuration, loading field data, and publishing the final vision results.
-
-*   [**`ConfigInterface.cpp`**](src/cpp/io/ConfigInterface.cpp): Manages the dynamic configuration for each camera pipeline. It subscribes to a dedicated NetworkTables topic for each camera (`/cameras/<hardware_id>/config`) to receive settings from the robot code.
-    *   **Dynamic Settings**: It listens for changes to camera settings like `exposure` and `gain`, allowing for on-the-fly tuning.
-    *   **Essential Configuration**: It is responsible for fetching critical data needed for processing, including the camera's `role` (e.g., 'shooter', 'intake'), the `camera_matrix`, and `distortion_coefficients`.
-    *   **Initialization Gate**: The pipeline will wait until it receives an initial valid configuration (specifically, a `role` and `camera_matrix`) before starting, ensuring it does not run with default or invalid parameters.
-
-*   [**`FieldInterface.cpp`**](src/cpp/io/FieldInterface.cpp): This class is responsible for loading the AprilTag layout for the current FRC field.
-    *   **Data Source**: It reads from the `/field` table in NetworkTables, which is expected to be populated by the robot code with the official field layout.
-    *   **Data Format**: It iterates through entries like `tag_1`, `tag_2`, etc., parsing the 7-double array (x, y, z, qw, qx, qy, qz) for each tag into an `frc::Pose3d`.
-    *   **Ground Truth**: The resulting map of tag IDs to 3D poses provides the essential "ground truth" reference points required by the `CameraPoseEstimator` to determine the robot's location on the field.
-
-*   [**`OutputPublisher.cpp`**](src/cpp/io/OutputPublisher.cpp): This class takes the final, processed `AprilTagResult` and publishes it to the robot over NetworkTables.
-    *   **Serialization**: It serializes the complex result data into a single, flat array of doubles for efficient network transport. This array is published to the `observations` topic under `/cameras/<hardware_id>/output`.
-    *   **Packed Data Format**: The `observations` array is carefully structured. It begins with a flag indicating if one or two poses were found, followed by the reprojection error(s) and the pose data itself (translation and quaternion). It then appends the calculated viewing angles and distance for each visible tag.
-    *   **Metadata**: Alongside the primary observation data, it also publishes the processing `fps` and attaches the original frame capture timestamp to the data packet, allowing the robot to perform precise latency compensation.
-
-### Pipeline
-
-*   [**`Pipeline.cpp`**](src/cpp/pipeline/Pipeline.cpp): This class is responsible for the entire lifecycle and data flow for one camera.
-    *   **Initialization**: On startup, it first waits for a valid configuration from the `ConfigInterface`. Once received, it initializes the `Camera`, loads the field layout via `FieldInterface`, and prepares the `OutputPublisher`. It critically depends on receiving valid camera calibration data (`camera_matrix` and `distortion_coefficients`) to enable pose estimation.
-    *   **Threading Model**: To maximize performance and prevent bottlenecks, the pipeline operates on two main threads:
-        *   **Processing Thread**: A high-priority loop dedicated to grabbing frames from the `Camera`, running the `FiducialDetector`, and then passing the results to the `CameraPoseEstimator` and `TagAngleCalculator`. This thread runs as fast as the camera and processing will allow.
-        *   **NetworkTables Thread**: A separate loop responsible for taking the final, processed results and sending them to the RoboRIO via the `OutputPublisher`.
-    *   **Decoupling**: The processing and networking threads are decoupled by a thread-safe queue. The processing thread pushes results into the queue, and the networking thread pops them off. This ensures that a slow network connection does not block or slow down the time-critical image processing loop.
-    *   **Dynamic Configuration**: The pipeline continuously monitors for configuration changes from NetworkTables. It can update camera settings like exposure and gain on-the-fly.
-    *   **Setup Mode**: It implements a special "Setup Mode" which, when enabled via NetworkTables, starts an MJPEG stream server. This allows for live viewing of the camera's feed for aiming, focusing, and tuning.
-
-
-## Building and Installing
-
-This repository provides dockerfiles for X86 and ARM platforms. If building GompeiVision from source, we recommend installing the dockerfile and building in the docker container. This provides an optimal build environment with the correct dependencies.
-
-The GompeiVision build packages a .deb file which can be installed on your coprocessor
+[GPL-3.0](LICENSE).

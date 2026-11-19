@@ -26,10 +26,12 @@ Every latency, resource and timing figure here is an **estimate**. Figures becom
 
 **Goals**
 
-- One self-contained unit (board + cameras + enclosure) that implements the macro architecture in [`GompeiVisionStructureDiagram.dot`](../GompeiVisionStructureDiagram.dot): capture, FrameBus, Mono/Stereo TagPnP, object recognition and localization, TagSLAM, MCL, VSLAM, NetworkTables output and persistent map storage.
+- A self-contained, Limelight-sized **stereo module** (board, exactly 2 cameras, SSD and enclosure, a few inches on each side) that implements the macro architecture in [`GompeiVisionStructureDiagram.dot`](../GompeiVisionStructureDiagram.dot): capture, FrameBus, Mono/Stereo TagPnP, object recognition and localization, TagSLAM, MCL, VSLAM, NetworkTables output, persistent map storage and onboard video recording. A robot carries as many modules as it needs.
 - Exposure-to-measurement latency on the tag path that is low **and** nearly constant, with hardware exposure timestamps.
 - Drop-in replacement for the CPU pipeline: robot code keeps using the same NetworkTables topics.
-- At least 2 cameras per unit at 1280×800, ≥100 FPS for AprilTags (to be confirmed in Stage 0b against the chosen part).
+- Both of a module's cameras at 1280×800, ≥100 FPS for AprilTags, hardware-synchronized (to be confirmed in Stage 0b against the chosen part).
+- Every module records both lenses to its own SSD, with per-frame timestamps that line up with robot logs.
+- Fast recovery after a brownout or power cut: the tag path is producing measurements again within a few seconds, without waiting for Linux to boot.
 
 **Non-goals**
 
@@ -37,6 +39,7 @@ Every latency, resource and timing figure here is an **estimate**. Figures becom
 - Putting everything in FPGA logic. Blocks go where they fit best (see [Where each block runs](#where-each-block-runs)).
 - Writing our own NetworkTables client or neural-network accelerator when maintained ones exist.
 - Replacing the CPU pipeline before the FPGA build reaches output parity (Stage 5).
+- A custom ASIC. The processing tail is a fraction of a millisecond next to exposure and readout, so an ASIC would save almost nothing, costs far more and can't be changed after fabrication.
 
 ## Feasibility by block
 
@@ -46,17 +49,19 @@ Legend: **[PL]** FPGA logic, **[RPU]** real-time Cortex-R5F cores, **[APU]** Cor
 |---|---|---|---|
 | MonoCameras, StereoCameras | [PL] MIPI CSI-2 RX (vendor IP), hardware trigger and exposure-strobe timestamp counter; sensor I2C config from [APU] | Easy–moderate | Feasible. Risk: MIPI bring-up and signal integrity |
 | MonoFrameBus, StereoFrameBus | [PL] AXI-Stream switch with per-consumer FIFOs and a DDR writer | Easy | Feasible |
-| MonoTagPnP (detection) | [PL] streaming threshold → connected components → boundary clustering → quad fit → decode → edge refinement | Moderate–hard | Feasible. The core latency win, and the biggest piece of custom hardware. See [AprilTag detector](#apriltag-detector) |
+| MonoTagPnP (detection) | [PL] streaming threshold → connected components with per-component feature accumulators → quad finding (two candidates, chosen in Stage 1) → edge refinement → decode | Moderate–hard | Feasible. The core latency win, and the biggest piece of custom hardware. See [AprilTag detector](#apriltag-detector) |
 | MonoTagPnP, StereoTagPnP (pose) | [RPU] IPPE-square and SQPnP, ported from the OpenCV calls in [`CameraPoseEstimator.cpp`](../src/cpp/estimator/CameraPoseEstimator.cpp) and [`SingleTagPoseEstimator.cpp`](../src/cpp/estimator/SingleTagPoseEstimator.cpp) | Easy–moderate | Feasible; expected well under 1 ms on an R5F with its double-precision FPU |
 | TagAngleCalculator | [RPU] undistort corners, convert to angles | Easy | Feasible |
-| MCL | [PL] parallel particle scoring + [RPU] resampling, motion model from RobotData | Moderate | Feasible; a natural fit for parallel hardware |
-| ObjectRecognition | [PL] AMD's prebuilt DPU accelerator, run from [APU] via Vitis AI | Moderate | Feasible. Risk: Vitis AI support and DPU size on the chosen part; model quantization accuracy |
+| Heading for single-tag disambiguation | Default: robot code picks between the two IPPE solutions using its own gyro history. Optional: heading-constrained solve on the [RPU], with an SPI IMU on the carrier board timestamped by the [PL] | Easy (default) / moderate (IMU) | Feasible. Risk: heading offset handling and feedback loops. See [Heading and pose disambiguation](#heading-and-pose-disambiguation) |
+| MCL | [PL] parallel particle scoring + [RPU] resampling, motion model from RobotData | Moderate | Feasible; a natural fit for parallel hardware. Per module first; see [Multiple modules](#multiple-modules) |
+| ObjectRecognition | [PL] AMD's prebuilt DPU accelerator, run from [APU] via Vitis AI, on the color module variant only | Moderate | Feasible. Risk: Vitis AI support and DPU size on the chosen part; model quantization accuracy |
 | ObjectLocalization | [APU] ground-plane projection with camera extrinsics | Easy | Feasible |
-| TagSLAM | [APU] fixed-lag sparse factor graph (tag landmarks, robot keyframes, odometry from RobotData) using an existing solver library | Moderate | Feasible; small problem (one field's tags) |
-| VSLAM, LocalGeometricMap | [APU] tracking, bundle adjustment and map management, built on an existing open-source SLAM system; optional [PL] FAST/ORB features | Hard | Feasible as a CPU workload, limited by A53 speed. Research stretch |
-| PoseMeasurements, ObjectData, MapData | [APU] WPILib `ntcore` in a real-time thread; optional [PL]+[RPU] raw-UDP fast path | Easy–moderate | Feasible. Risk: Linux publish jitter (measured in Stage 5) |
-| MapStorage, SavedVSLAMMap | [APU] files on eMMC/microSD | Easy | Feasible |
-| Setup-mode stream (from CPU version) | [APU] MJPEG from the frame store (or the chip's hardware video encoder, if present) | Easy | Feasible |
+| TagSLAM | [APU] fixed-lag sparse factor graph (tag landmarks, robot keyframes, odometry from RobotData) using an existing solver library | Moderate | Feasible; small problem (one field's tags). One instance per module, anchoring that module to the field |
+| VSLAM, LocalGeometricMap | [APU] tracking, bundle adjustment and map management, built on an existing open-source SLAM system; optional [PL] FAST/ORB features | Hard | Feasible as a CPU workload, limited by A53 speed (estimate 5–15 Hz with one stereo pair per module). Research stretch |
+| PoseMeasurements, ObjectData, MapData | [APU] WPILib `ntcore` in a real-time thread; optional fast path that skips Linux, driven by the [RPU]: raw UDP through a [PL] Ethernet MAC, or CAN-FD to SystemCore through a [PL] CAN-FD controller | Easy–moderate | Feasible. Risk: Linux publish jitter (measured in Stage 5) |
+| MapStorage, SavedVSLAMMap | [APU] files on eMMC | Easy | Feasible |
+| Video recording (not in the diagram) | VCU hardware encoder (H.264/H.265) reading the DDR frame store; [APU] GStreamer writes segmented files to the module's M.2 SSD | Easy–moderate | Feasible. Both lenses at 120 FPS use about half the VCU's ~4K60 capacity. See [Video recording](#video-recording-vcu--apu) |
+| Setup-mode stream (from CPU version) | [APU] MJPEG from the frame store, or H.264 from the VCU hardware encoder (the K26 has one) | Easy | Feasible |
 
 **Overall:** feasible. The only large custom hardware block is the AprilTag detector (plus the smaller MCL scoring engine). Everything else is ported or existing software, or prebuilt IP.
 
@@ -72,9 +77,21 @@ Rules:
 
 - **The tag path never waits on ordinary Linux work.** Capture → detection → PnP runs entirely in PL and RPU. The finished measurement goes through shared memory to a high-priority real-time (PREEMPT_RT) publisher thread on the APU, which sends it with `ntcore`.
 - **Measurement time comes from the hardware exposure timestamp**, converted to NT server time. Jitter in delivery never changes the timestamp the robot sees.
-- **If Stage 5 measures publish jitter as too high**, add a small Ethernet MAC in PL driven by the RPU, sending a raw-UDP fast path that doesn't touch Linux at all.
+- **If Stage 5 measures publish jitter as too high**, add a fast path driven by the RPU that doesn't touch Linux at all: raw UDP through a small Ethernet MAC in PL, or CAN-FD on a dedicated SystemCore bus (see [CAN-FD fast path](#can-fd-fast-path)).
+- **The tag path boots without Linux.** The first-stage boot loader loads the bitstream, the RPU firmware and the last config cached in flash, so capture → detection → PnP (and the fast path, if built) run within a few seconds of power-on. Linux attaches to the running RPU later (remoteproc attach, to be confirmed in Stage 2) and adds NetworkTables, config updates and everything else.
 - All blocks exchange the versioned [FrameBus messages](#interfaces-and-message-formats) through shared memory, so a block can move between tiers without changes upstream or downstream.
 - A block moves tiers only after a stage measures it missing its budget. The stage doc records the measurement and the decision.
+
+### Multiple modules
+
+Each module is independent: its own SoC, stereo pair, SSD, Ethernet and CAN-FD connections. Nothing on one module depends on another.
+
+- **Per module:** capture, tags, PnP and stereo PnP, features, stereo VSLAM, TagSLAM, recording and, on the color variant, object detection.
+- **The field frame is the shared language.** Each module's TagSLAM anchors its poses to the field using tags, so every module reports in field coordinates even though each VSLAM map is local to that module.
+- **Fusion happens on the robot.** The robot's pose estimator fuses each module's measurements with their own timestamps and standard deviations, like running several Limelights. There's no single combined map.
+- **MCL** runs per module on its own detections first. A single MCL that scores every module's detections (on the robot, or on one module that subscribes to the others) is a later option, decided in Stage 9.
+- **Identity:** each module's board ID sets its NT topics (one `hardware_id` per lens, plus module-level outputs) and its CAN ID.
+- **Shared CAN-FD bus:** each module sends about one 64-byte frame per camera frame, a few percent of a 5 Mbps bus, so several modules can share one dedicated vision bus.
 
 ## Latency budget
 
@@ -95,11 +112,22 @@ Rules:
 | Step | Estimate |
 |---|---|
 | Exposure | 1–3 ms (same sensor physics) |
-| Sensor readout | overlaps with processing; only the rows *after* the last tag's bottom edge are waiting time |
-| Detection tail after the last tag row (component closes, quad fit, decode, refine) | 0.5–2 ms |
+| Sensor readout | overlaps with processing; only the rows *after* the last tag's bottom edge are waiting time (0 to almost a full readout, depending on where the tag is) |
+| Streaming pipeline delay (threshold look-ahead, labeling) | 10–20 rows, ≈50–150 µs |
+| Detection tail after the last tag row (component closes, quad fit, refine, decode) | 0.5–2 ms with boundary clustering, the RPU fit and DDR read-back; stretch target ≈20–200 µs with the corner scorecard and the on-chip strip buffer |
 | PnP on RPU | <1 ms |
-| Hand-off to APU real-time thread + `ntcore` flush | <0.5 ms typical, jitter to be measured |
-| **Total exposure start → packet on the wire** | **~3–7 ms + remaining readout, with low jitter** |
+| Output | NT: hand-off to APU real-time thread + `ntcore` flush, <0.5 ms typical, jitter to be measured. CAN-FD fast path: ≈0.1–0.35 ms on the wire, near-constant |
+| **Total exposure start → packet on the wire** | **~3–7 ms + remaining readout, with low jitter** (stretch: ~2–5 ms + remaining readout) |
+
+### Readout is the floor
+
+A global-shutter sensor exposes every row at the same moment, but still reads the rows out one at a time over MIPI. A tag near the bottom of the image waits for almost a full readout. Once the PL pipeline exists, exposure and readout dominate the budget, and the remaining levers are on the sensor side:
+
+- **Sensor windowing:** read out only the rows where tags can appear. 1280×400 instead of 1280×800 roughly halves the worst-case readout.
+- **More MIPI lanes or a faster lane rate.**
+- **Short exposure,** with brighter tags or IR illumination (check the lighting rules).
+
+This is also why the FPGA build uses MIPI rather than USB cameras (see [Sensors](#sensors)).
 
 Object detection, TagSLAM and VSLAM aren't on this path. They have their own, looser budgets in their stage docs.
 
@@ -109,7 +137,8 @@ The robot loop runs every 20 ms (faster with high-frequency odometry threads), a
 
 - The **biggest wins are jitter and timestamp accuracy.** A measurement whose age is known to ±0.1 ms fuses better than one known to ±5 ms, especially when the robot is turning fast.
 - Lower absolute latency helps auto-align settle faster and reduces how far back the estimator has to replay odometry.
-- After the packet leaves the unit, the robot-side NT server and the robot loop phase add up to one loop period. The raw-UDP fast path only helps if robot code reads it from a separate thread or notifier.
+- After the packet leaves the unit, the robot-side NT server and the robot loop phase add up to one loop period. The fast paths make delivery shorter and steadier, but robot code still reads once per loop (see the [one-loop robot contract](#one-loop-robot-contract)); the exposure timestamps make that wait harmless for accuracy.
+- At 120 FPS, 2–3 measurements arrive per 20 ms robot loop. Robot code must read **all** of them (NT `readQueue()` rather than `get()`, or every queued CAN frame), and fuse each with its own timestamp. Otherwise most of the extra frame rate is thrown away.
 
 Stage 1 builds an **LED glass-to-robot rig** (an LED the robot toggles, seen by the camera, timestamped on both sides) so both systems are measured the same way.
 
@@ -118,30 +147,37 @@ Stage 1 builds an **LED glass-to-robot rig** (an LED the robot toggles, seen by 
 | Stream | Rate |
 |---|---|
 | One mono camera, 1280×800, 8-bit, 120 FPS | ≈123 MB/s |
-| Four mono cameras | ≈490 MB/s |
+| Stereo pair (one module) | ≈246 MB/s |
 | Color camera for object detection, downscaled to e.g. 320×320 RGB at 30 FPS | ≈9 MB/s |
+| VCU encoding both lenses (frame reads plus reference frames) | roughly 0.5–1 GB/s (estimate) |
+| Encoded video to the SSD, both lenses, match mode | ≈1.5–3 MB/s (10–20 Mbps) |
 | DDR frame store writes + DPU weights/activations + Linux + VSLAM | a few GB/s at most |
 
-Zynq UltraScale+ modules use a wide DDR4 interface shared by PL, RPU and APU. Bandwidth is not expected to be the limit, but the DPU and VSLAM compete with the frame store, so Stage 7 and Stage 10 measure memory contention and check that the tag path is unaffected. On-chip RAM (block RAM / UltraRAM) for line buffers, tile statistics, label tables and the DPU is the tighter budget; Stage 0b estimates it per block.
+Zynq UltraScale+ modules use a wide DDR4 interface shared by PL, RPU and APU. Bandwidth is not expected to be the limit, but the DPU, VSLAM and the VCU compete with the frame store, so Stages 3, 7 and 10 measure memory contention and check that the tag path is unaffected. On-chip RAM (block RAM / UltraRAM) for line buffers, tile statistics, label tables and the DPU is the tighter budget; Stage 0b estimates it per block.
+
+**On-chip strip buffer for decode read-back.** Refinement and decode only read pixels of tags that have just closed. So the PL can keep a rolling buffer of the last N rows in UltraRAM (for example 256 rows × 1280 px ≈ 320 KB) and read from it with fixed 1–2-cycle latency, instead of going to DDR. Tags taller than N rows fall back to the DDR frame store. This also keeps the tag path out of DDR contention with the DPU and VSLAM. A full on-chip double buffer (≈2 MB for two 1280×800 frames) would use most of the K26's UltraRAM, which the DPU also wants; Stage 0b checks the numbers.
 
 ## Hardware
 
 ### Selection criteria (Stage 0b)
 
 1. SoC FPGA with Linux-capable application cores, real-time cores and FPGA logic sharing DDR.
-2. MIPI CSI-2 receive for at least 2 (ideally 4) cameras.
+2. MIPI CSI-2 receive for 2 cameras (one stereo pair per module).
 3. Enough logic, DSP and on-chip RAM for the AprilTag pipeline, MCL scoring and a DPU, with ≥30% headroom.
 4. Vitis AI (or equivalent) supports a DPU on the part.
 5. An off-the-shelf module and dev kit available now, so we can prototype before designing our own board.
 6. Covered by the free tier of the vendor toolchain.
 7. Cost within FRC per-item limits.
+8. A hardware video encoder (an "EV" Zynq UltraScale+ part; EG parts have none) and PCIe for an M.2 SSD.
+9. Small enough for a Limelight-sized module, with heat the housing can remove.
 
 ### Candidates
 
 | Option | Why | Concerns |
 |---|---|---|
-| **AMD Kria K26 SOM + dev kit (KV260 or KR260)** (primary) | Zynq UltraScale+ MPSoC with A53 + R5F + PL + DDR4 on one module; dev kits with camera connectors and Ethernet; vendor Ubuntu and PetaLinux images; Vitis AI DPU examples | Confirm current Vitis AI support level, free-tier coverage, MIPI port count on the kit and price |
-| Other Zynq UltraScale+ boards | Same chip family, same toolchain; possibly more camera ports | Usually more expensive, less community support |
+| **AMD Kria K26 SOM + dev kit (KV260 or KR260)** (primary) | Zynq UltraScale+ MPSoC with A53 + R5F + PL + DDR4 on one module; dev kits with camera connectors and Ethernet; vendor Ubuntu and PetaLinux images; Vitis AI DPU examples | Confirm current Vitis AI support level, free-tier coverage, MIPI port count on the kit and price. The module's footprint (≈77 × 60 mm) sets the minimum module size |
+| Smaller Zynq UltraScale+ SOMs (ZU4EV/ZU5EV class, roughly 4 × 5 cm) | Same chip family and toolchain, in a smaller module | Must be an EV part to keep the video encoder; usually more expensive, less community support |
+| Flash-based FPGA (e.g. Microchip PolarFire SoC, Lattice CrossLink-NX / Certus-NX) | Instant-on: the configuration survives power loss, so the logic is ready in milliseconds. Some Lattice parts have hardened MIPI receivers | Much less logic and RAM than a K26, no DPU, different toolchain. Considered for a future tag-only unit, not the primary |
 | Separate CPU with NPU + small FPGA (e.g. an RK3588 board like the Orange Pi 5, plus an FPGA front-end) | Faster CPU cores and a built-in NPU for object detection | Two chips, a CPU↔FPGA link (PCIe/MIPI) to design, no shared memory; more board work |
 
 Zynq UltraScale+ is the primary choice because shared memory and one toolchain make the CPU/FPGA split simple. The separate-chip option stays documented as a fallback if VSLAM or object detection turns out to need much faster CPU cores than the A53s.
@@ -151,8 +187,19 @@ All part-specific numbers (logic, DSP, RAM, MIPI ports, price) get filled in and
 ### Sensors
 
 - **AprilTags:** monochrome global shutter, 1–2 MP, ≥100 FPS, MIPI CSI-2, external trigger and strobe output (OV9281-class).
-- **Objects:** color global shutter (AR0234-class), run at lower FPS and downscaled for the DPU.
-- **Stereo:** two identical sensors on one trigger line, rigid mount, factory-calibrated baseline.
+- **Objects:** a module variant whose pair is color global shutter (AR0234-class), run at lower FPS and downscaled for the DPU. Every module still has exactly two lenses.
+- **Stereo:** every module's two sensors are identical, share one trigger line, and sit at the far ends of the module on a rigid mount. A Limelight-sized module allows roughly a 60–80 mm baseline. Depth error grows with distance squared: roughly 0.4 cm at 1 m, 3.5 cm at 3 m and 14 cm at 6 m (estimate for a ~70 mm baseline, ~70° lenses and quarter-pixel matching). Stereo is strongest up close; tag accuracy at range comes from PnP, not the baseline.
+- **Why MIPI, not USB:** a USB (UVC) camera hands complete frames to Linux, and many have a bridge chip that buffers internally, so the PL can't start until the frame is done. MIPI CSI-2 sends uncompressed RAW8/RAW10 rows straight into the PL, one packet per row, with frame start/end markers. Leave the sensor's optional DPCM compression off.
+- **Cable length:** MIPI flex cables are fragile and limited to roughly tens of centimeters. Inside a module the camera boards sit a few centimeters from the carrier on short, enclosed cables, so this mostly matters for dev-kit prototypes. Cameras mounted away from the unit use a serializer link (GMSL or FPD-Link over coax, a few µs of added delay). GigE Vision cameras are the fallback for off-the-shelf remote cameras: their packets carry rows as they're read out, and UDP is easy to parse in PL.
+
+### Module form factor
+
+About the size of a Limelight: roughly 3.5–4.5 × 2.5–3 × 1.5–2 in (estimate, set in Stage 11).
+
+- **Stack, front to back:** camera boards at the far ends of the front plate → short MIPI flex → carrier board (M.2 2230 SSD underneath) → K26 SOM → heatsink and fan.
+- **Back panel:** power, Ethernet, CAN-FD.
+- **Heat is the main constraint.** Estimated draw: K26 under full load ~8–15 W, cameras ~1 W, SSD writing ~2–3 W, so ~12–20 W in a few cubic inches. The aluminum housing is the heatsink, the SoC is thermally bonded to it, a small filtered fan moves air, and the chip temperature goes on the status topic.
+- **Power:** 12 V through a buck-boost regulator, or PoE over the Ethernet cable for a single cable (check the FRC power rules).
 
 ## Toolchain
 
@@ -188,13 +235,19 @@ All part-specific numbers (logic, DSP, RAM, MIPI ports, price) get filled in and
 
 Follows the AprilTag 3 algorithm used today ([`FiducialDetector.cpp`](../src/cpp/detector/FiducialDetector.cpp)) so results can be compared one to one.
 
-1. **Optional decimation** (like `quad_decimate`) in a line buffer.
-2. **Adaptive threshold:** per-tile min/max, dilated over neighboring tiles, using a few tile-rows of buffering.
-3. **Streaming connected components:** single-pass union-find labeling for black and white regions, with an equivalence table that is resolved as rows complete.
-4. **Boundary clustering:** pixels on black/white edges are grouped by their (black component, white component) pair. When both components close, the cluster is emitted. This is the irregular part; hashing and memory layout here decide feasibility.
-5. **Quad fitting:** clusters go to fit engines (sort by angle, line-fit error, corner search). First implementation: run the fit on the RPU to get working end to end; then move the hot loop to PL fit engines if the RPU can't keep up.
-6. **Decode and edge refinement:** by the time a quad is known, the tag's top rows have left the line buffers, so the decoder reads the needed pixels back from the DDR frame store. Reads are small and local (bit sampling grid plus edge strips), so this costs microseconds.
-7. **Output:** tag ID, decision margin, Hamming distance and four subpixel corners in the TL/TR/BR/BL order the CPU code uses.
+1. **Optional decimation** (like `quad_decimate`) in a line buffer. Full resolution costs no throughput in PL, so decimation only matters for label-table size.
+2. **Adaptive threshold:** per-tile min/max, dilated over neighboring tiles, using a few tile-rows of buffering. If the look-ahead matters, an option is to use the previous frame's tile statistics (zero added rows, slight lag when lighting changes fast).
+3. **Streaming connected components:** single-pass union-find labeling for black and white regions, with an equivalence table resolved during horizontal blanking, and label recycling. Each component carries a small **feature accumulator**, updated per pixel: area, bounding box and the extreme pixel in K directions (see 4B). Every field combines with a min, max or sum, so merging two components just merges their accumulators. A component **closes** when a row adds no pixels to it, and its accumulator is emitted right away, before the rest of the frame arrives.
+4. **Quad finding: two candidates, chosen in Stage 1** on recorded data. Cheap filters on the accumulator (area, bounding-box aspect, black/white ratio) run first, so most components never reach either path.
+   - **4A. Boundary clustering + quad fit** (closest to the reference library). Pixels on black/white edges are grouped by their (black component, white component) pair. When both components close, the cluster goes to a fit engine: sort by angle, line-fit error from prefix sums, corner search. The first implementation runs the fit on the RPU; the hot loop moves to PL fit engines if the RPU can't keep up. This is the irregular part; hashing and memory layout decide feasibility.
+   - **4B. Corner scorecard** (cheaper, fully streaming). For each black component, the accumulator tracks the pixel farthest along each of K = 16 directions (the max of x·cosθ + y·sinθ). Each corner of a convex quad is the extreme point for a range of directions equal to 180° minus its interior angle, so K = 16 catches corners up to about 157°. When the component closes, merge near-duplicate extremes and keep the 4 that enclose the largest area. No edge points are stored or sorted. It relies on the tag's white quiet zone (true for 36h11). Components it can't handle (tag merged with dark background, partly occluded) go to the RPU for a 4A-style software fit from the frame store.
+5. **Edge refinement:** sample across each of the 4 edges between the approximate corners, find the gradient peak, least-squares fit each edge and intersect. This produces the subpixel corners for 4B, and improves 4A.
+6. **Decode:** closed-form square-to-quad homography (Heckbert's projective mapping: a few dozen multiplies and two divides, no linear solve). Sample the border and data cells, fit the black/white brightness model from the border, and threshold each bit. Match against the 587 codes × 4 rotations of 36h11 stored in block RAM, checking about 64 per clock cycle (XOR + popcount): roughly 40 cycles and a few thousand LUTs. A fully parallel matcher would cost on the order of 100k LUTs.
+7. **Pixel read-back:** by the time a tag closes, its top rows have left the line buffers. Refinement and decode read from the on-chip strip buffer (see [Bandwidth and memory budget](#bandwidth-and-memory-budget)), falling back to the DDR frame store. Reads are small and local (bit sampling grid plus edge strips), so this costs microseconds.
+8. **Frame boundaries:** every block resets its per-frame state (labels, accumulators, tile statistics) when the start-of-frame sideband reaches it, so blocks can be working on different frames at the same time. Every result carries the frame ID. A frame-store slot isn't reused until all of its tags are decoded; if it would be, the remaining candidates are dropped and counted, never stalled.
+9. **Output:** tag ID, decision margin, Hamming distance and four subpixel corners in the TL/TR/BR/BL order the CPU code uses.
+
+Fixed-point widths for the homography and refinement come from the golden model's error budget (target: corners within 0.1 px of the CPU output).
 
 ### Pose estimation (RPU)
 
@@ -202,6 +255,19 @@ Follows the AprilTag 3 algorithm used today ([`FiducialDetector.cpp`](../src/cpp
 - The R5F has a double-precision FPU, so the math can match the golden model closely.
 - Stereo: triangulate matched corners from the synced pair, then solve a joint PnP.
 - Results go into a shared-memory ring that the APU publisher thread reads.
+
+### Heading and pose disambiguation
+
+Single-tag PnP has two solutions. Using the robot's heading to pick between them, or to constrain the solve, is the idea behind MegaTag2-style localization. Options, in order:
+
+1. **Default: disambiguate on the robot.** The unit already publishes both IPPE solutions and their errors. Robot code looks up its gyro heading at the measurement timestamp in the pose estimator's history and picks the matching solution. No heading goes back to the unit, so nothing waits on a round trip.
+2. **Heading-constrained solve on the RPU,** if we want the unit to output a final pose. The RPU needs the heading *at exposure time*. It never buffers frames waiting for heading: it keeps a short heading history and interpolates, or extrapolates from the latest heading plus yaw rate (the error is about ½ × angular acceleration × gap², negligible for gaps of a few ms). Heading and yaw rate come from RobotData (Stage 8), sent every robot loop.
+3. **Onboard IMU** (optional): a MEMS gyro on SPI, sampled at ≥1 kHz and timestamped by the same PL counter as the camera exposures. A complementary or small Kalman filter corrects its drift and field-zero offset using:
+   - the robot's heading from RobotData (slow correction, and the field zero), and
+   - **unconstrained** multi-tag PnP heading, only when quality gates pass (≥2 tags, low reprojection error, tags close and large, slow rotation).
+
+   Gate corrections on measurement quality, not on whether tags are in view. Never feed the heading-constrained solve's own output back into the filter: that's circular and lets errors reinforce.
+4. **Listening to the robot's IMU on CAN:** CAN is broadcast, so a unit on the IMU's bus could timestamp the IMU's own frames. Commercial FRC IMU protocols are generally undocumented and robot code keeps its own heading offset, so this is only worth it with an IMU whose protocol we control.
 
 ### MCL (PL + RPU)
 
@@ -237,12 +303,37 @@ Follows the AprilTag 3 algorithm used today ([`FiducialDetector.cpp`](../src/cpp
 - Config and field ingest reuse [`ConfigInterface.cpp`](../src/cpp/io/ConfigInterface.cpp) and [`FieldInterface.cpp`](../src/cpp/io/FieldInterface.cpp).
 - A PREEMPT_RT publisher thread for the tag path; other publishers at normal priority.
 - Hardware exposure timestamps are converted to NT server time using `ntcore`'s time-sync offset and sent as the value timestamp, as the CPU version does.
-- Optional raw-UDP fast path from the RPU through a PL Ethernet MAC, only if Stage 5 shows it's needed.
+- Optional fast path, only if Stage 5 shows it's needed: raw UDP from the RPU through a PL Ethernet MAC, or CAN-FD to SystemCore (below).
 - HTTP server for the setup-mode stream and a status page.
+
+### CAN-FD fast path
+
+Optional, and SystemCore only: SystemCore has CAN-FD buses, while the roboRIO's CAN is classic CAN 2.0 (8-byte frames at 1 Mbps). NT stays the contract either way.
+
+- **Dedicated bus:** the modules and SystemCore alone on one of SystemCore's buses, terminated with 120 Ω at both ends. No motor traffic to wait behind, and a faulty module can't disturb drivetrain control. Each module uses only a few percent of the bus and has its own CAN ID from its board ID.
+- **Controller:** the Zynq's built-in CAN controllers are classic CAN only. Use a CAN-FD controller in PL (AMD's CAN FD IP, check its license, or an open-source core) driven by the RPU, or an external MCP2518FD over SPI (adds tens of µs). The transceiver must be CAN-FD rated (TJA1462, TCAN1042 or MCP2562FD class).
+- **Timing:** a 64-byte frame takes about 0.35 ms at a 2 Mbps data rate, 0.16 ms at 5 Mbps and 0.11 ms at 8 Mbps, with near-constant transit on a dedicated bus.
+- **IDs:** FRC extended IDs with manufacturer "Team Use" and device type "Miscellaneous", read on the robot through WPILib's `CAN` class. Check how the SystemCore API exposes FD frames and bus selection.
+- **No clock sync needed:** each frame carries the measurement's *age* at send time, and robot code computes `capture time = receive timestamp − age − fixed transit`.
+- **Robot side:** drained once per loop under the [one-loop robot contract](#one-loop-robot-contract). WPILib's custom-device `CAN` class keeps only the newest packet per message ID, so the module rotates the API index with the frame counter (for example, frame counter mod 8) and robot code reads all 8 slots each loop, keeping the new ones. Check whether SystemCore's API offers a real receive queue instead.
+- Because the RPU drives it, this path works before Linux has finished booting.
+
+The draft frame layout is in [Interfaces and message formats](#interfaces-and-message-formats).
+
+### Video recording (VCU + APU)
+
+- The VCU (the Zynq's hard H.264/H.265 encoder) reads both lenses from the DDR frame store. Its total capacity is about 4K at 60 FPS (≈500 Mpx/s). Both lenses at 1280×800 and 120 FPS are ≈246 Mpx/s, about half, leaving room for the setup stream. Recording at 30–60 FPS is enough for match replays and leaves more headroom.
+- The two lenses are encoded **side by side** in one 2560×800 stream, so left and right frames stay paired in one file.
+- Mono sensors: encode as monochrome (4:0:0) if the VCU and our tool version support it; otherwise fill the chroma planes with a constant in PL.
+- [APU] GStreamer with AMD's VCU plugins writes **segmented** files (a few seconds each, fragmented MP4 or MKV) to an ext4 or f2fs data partition on the M.2 SSD, separate from the read-only root. A power cut loses at most the last segment.
+- A **metadata file** per recording: frame ID, hardware exposure timestamp, detections and poses for each frame, and a sync point to the robot's AdvantageKit/WPILOG log.
+- Two modes: **match** (H.265, 30–60 FPS, ≈10–20 Mbps per module, ≈0.2–0.4 GB per match) and **dataset** (raw frames, ≈246 MB/s per module, for golden-model datasets and VSLAM replays; practice sessions only, since compression changes pixel values).
+- Started and stopped from robot code over NT (for example, start at match start).
+- Recording never touches the tag path; Stage 3's contention test confirms it.
 
 ### Storage (APU)
 
-- Files on eMMC or microSD: board ID, cached config, DPU model, saved tag and VSLAM maps.
+- Files on eMMC: board ID, cached config, DPU model, saved tag and VSLAM maps. No SD card on the robot (they work loose and corrupt on power cuts); the root filesystem is read-only. Video and dataset recordings go to the M.2 SSD.
 
 ## Interfaces and message formats
 
@@ -250,6 +341,19 @@ Follows the AprilTag 3 algorithm used today ([`FiducialDetector.cpp`](../src/cpp
 - **Control:** AXI-Lite registers per PL block, generated from one register description file and exposed to Linux (UIO or a small driver) and the RPU.
 - **APU ↔ RPU:** OpenAMP/RPMsg for control, shared-memory rings for data.
 - **FrameBus messages:** a versioned, fixed-layout binary format for everything above the pixel level: tag detections, poses, object boxes, features, RobotData, map updates. Each message carries the frame ID and exposure timestamp. The same format is used in every shared-memory ring, so blocks can move between PL, RPU and APU.
+- **CAN-FD frame (draft, fast path only):** the same content as `observations`, quantized into one 64-byte frame.
+
+  | Bytes | Field |
+  |---|---|
+  | 0–1 | Frame counter (diagnostics and CAN slot rotation; robot code doesn't need to remember it) |
+  | 2–3 | Age at send time, µs (up to 65 ms) |
+  | 4 | Flags: camera index, number of solutions (1 or 2), format version |
+  | 5 | Tag count (up to 8) |
+  | 6–7 | Reserved |
+  | 8–23 | Solution 0: X, Y, Z (int16, mm), quaternion W, X, Y, Z (int16, scaled by 1/32767), error (uint16) |
+  | 24–39 | Solution 1, same layout (zero if absent) |
+  | 40–47 | Tag IDs (uint8 each) |
+  | 48–63 | Tag distances (uint16, mm each) |
 
 ## Robot interface (NetworkTables contract)
 
@@ -264,7 +368,20 @@ The unit keeps the CPU pipeline's topics, so robot code doesn't change:
 
 New outputs (object data, TagSLAM/MCL/VSLAM poses, refined map) get new topics under `/cameras/<hardware_id>/output/` or a unit-level table, defined in the stage that adds them. RobotData (heading, module positions) gets a new robot → unit topic in Stage 8.
 
-The contract stays NT4-based so it works with both the roboRIO and SystemCore.
+The contract stays NT4-based so it works with both the roboRIO and SystemCore. Robot code should read `observations` with a queue (`readQueue()`), since several measurements arrive per robot loop at 120 FPS.
+
+Each module publishes per-lens topics under its lenses' `hardware_id`s and module-level outputs (stereo, TagSLAM, VSLAM and MCL poses, recording status) under its board ID. Recording start/stop is a new robot → unit topic, defined in Stage 3.
+
+### One-loop robot contract
+
+Everything the robot controller receives from the modules is fully handled within the loop it's read in. The only vision state that lives longer is the pose estimator's own history.
+
+- **Each message is self-contained.** One NT value or one CAN-FD frame carries everything for one camera frame: capture timing, pose solutions, tag IDs and quality. Nothing is split across messages that would need reassembly.
+- **Absolute time, computed on arrival.** NT values carry the exposure time in NT server time. CAN-FD frames carry an age that robot code turns into an absolute timestamp using the receive time. No clock-sync state in robot code.
+- **Drain, use, discard.** Each loop: read every queued message (NT `readQueue()`, every CAN slot), compute capture times, pick between single-tag solutions using the pose estimator's history at the capture time (`sampleAt()`), reject bad measurements against the current estimate, set standard deviations, call `addVisionMeasurement()`, then drop the messages.
+- **State that would need to persist lives on the module:** drop and duplicate counting, consistency checks across frames, camera health and timeouts. Modules publish these as status, which robot code reads each loop.
+- **One path per measurement.** Sending the same measurement over both CAN-FD and NT would need deduplication across loops, so each module sends measurements over one path (CAN-FD when available) and uses NT for everything else.
+- **Budget:** 4 modules × 2 lenses × 120 FPS is about 20 measurements per 20 ms loop, or about 10 if each module sends one stereo measurement per frame. Each `addVisionMeasurement()` replays odometry from its capture time, so Stage 5 measures the per-loop cost.
 
 ## Verification strategy
 
@@ -275,8 +392,10 @@ Each layer must pass before the next is trusted:
 3. **Frame-replay simulation:** recorded match and practice-field videos (captured with the CPU system) replayed through the full simulated pipeline, comparing detections and poses with the CPU output.
 4. **Hardware-in-the-loop:** recorded frames loaded into the DDR frame store from Linux and fed into the real PL pipeline in place of the sensor, so on-chip results can be compared frame by frame.
 5. **Latency rig:** the LED glass-to-robot test from Stage 1, run on both systems.
-6. **Load tests:** tag-path latency measured while the DPU, TagSLAM and VSLAM run flat out, to prove the tiers don't interfere.
+6. **Load tests:** tag-path latency measured while the DPU, TagSLAM, VSLAM and recording run flat out, to prove the tiers don't interfere.
 7. **On-robot A/B:** CPU and FPGA units side by side on the practice robot, logging both to AdvantageKit/WPILOG.
+8. **Power-cut recovery:** cut power mid-stream and measure how long until the tag path (and fast path, if built) produces measurements again, and until NT is back.
+9. **Thermal:** a closed module on a hot robot, with every feature and recording running for a full practice day, chip temperature logged.
 
 ## Risk register
 
@@ -291,15 +410,25 @@ Each layer must pass before the next is trusted:
 | Vitis AI support for Zynq UltraScale+ changes or lapses | Medium | Medium | Check in Stage 0b; pin versions; CPU-only or NPU fallback for object detection |
 | MIPI signal integrity on our own board | Medium | High | Stay on the dev kit through Stage 10; carrier board for the SOM, not a full chip-down design; vendor layout guides |
 | FRC rule changes (power, cost, custom electronics) | Low | High | Check the game manual every season |
-| Electrical noise and brownouts on the robot | Medium | High | Wide-input regulator, brownout-tolerant boot, watchdog, read-only root filesystem, status topic |
+| Electrical noise and brownouts on the robot | Medium | High | Buck-boost regulator that holds the input steady through ~7 V sags, brownout-tolerant boot, watchdog, read-only root filesystem, eMMC boot (no SD card), status topic |
+| Unit reboots mid-match (hit or brownout) and is blind while Linux boots | Medium | High | Tag path boots from the first-stage loader without Linux; fast path from the RPU; recovery time measured in Stage 11 |
+| MIPI flex cable cracks or works loose on the robot | Medium | High | Locked mounting and strain relief, short runs, spares; serializer links (GMSL/FPD-Link) for cameras away from the unit |
+| Corner scorecard (4B) misses tags that touch dark background or are occluded | Medium | Low | Measured in Stage 1; RPU software-fit fallback; or use 4A |
+| SystemCore's CAN-FD API or bus setup doesn't suit a custom device | Medium | Low | NT stays the contract; raw UDP as the alternative fast path |
+| Heading filter corrected by its own constrained-solve output (feedback loop) | Low | Medium | Only unconstrained, quality-gated multi-tag headings feed the filter |
+| Module overheats in a Limelight-sized housing (~12–20 W) | Medium | High | Housing as heatsink, filtered fan, temperature on the status topic, thermal test in Stage 11; lower VSLAM rate or recording FPS when hot |
+| Short stereo baseline limits depth accuracy at range | High | Low | Lenses at the module's far ends; stereo up close, PnP for tags at range |
+| SSD corruption on power cuts | Medium | Low | Segmented recording, separate data partition, journaling filesystem |
 
 ## FRC rules checklist
 
 Check each item against the current season's game manual; rule numbers change every year.
 
-- [ ] Custom circuits and coprocessors are allowed and connect to the control system only through allowed interfaces (Ethernet through the robot radio/switch).
-- [ ] Powered from the PDH/PDP on an appropriately rated breaker or fuse.
-- [ ] Total cost (module, carrier board, cameras) within the per-item cost limit and counted in the cost accounting.
+- [ ] Custom circuits and coprocessors are allowed and connect to the control system only through allowed interfaces (Ethernet through the robot radio/switch; CAN, if the CAN-FD fast path is built).
+- [ ] If on CAN: custom CAN devices are allowed, use the "Team Use" manufacturer and "Miscellaneous" device type IDs, and bus wiring and termination follow the rules.
+- [ ] Frame grounding and ESD requirements are met for the unit and its enclosure.
+- [ ] Powered from the PDH/PDP on an appropriately rated breaker or fuse (if using PoE, the injector and wiring are allowed).
+- [ ] Each module's cost (SOM, carrier board, two cameras, SSD, housing) within the per-item cost limit, and every module counted in the cost accounting.
 - [ ] No wireless radios active on the board (disable any Wi-Fi/Bluetooth on dev kits).
 - [ ] Any illumination LEDs follow the lighting rules.
 - [ ] Mounting and enclosure meet the robot construction rules.

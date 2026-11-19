@@ -2,7 +2,7 @@
 
 ## Goal
 
-Detect and localize game pieces on the unit, for ObjectRecognition → ObjectLocalization → ObjectData, using AMD's prebuilt DPU accelerator.
+Detect and localize game pieces on the color module variant (a module whose two lenses are color global shutter), for ObjectRecognition → ObjectLocalization → ObjectData, using AMD's prebuilt DPU accelerator.
 
 ## Deliverables
 

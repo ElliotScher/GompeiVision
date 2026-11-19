@@ -2,7 +2,7 @@
 
 ## Goal
 
-Visual SLAM from the stereo pair, producing VSLAMPose and a LocalGeometricMap that can be saved and loaded as a prior for VSLAM and MCL.
+Visual SLAM from each module's stereo pair, producing VSLAMPose and a LocalGeometricMap that can be saved and loaded as a prior for VSLAM and MCL.
 
 ## Deliverables
 

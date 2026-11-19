@@ -10,6 +10,7 @@ Monte Carlo localization that keeps a global pose hypothesis (including after be
 - [PL] particle scoring engine: project expected tags into each camera per particle and score against detections, many particles in parallel.
 - [RPU] resampling, pose and covariance output, published through the APU like tag measurements.
 - Mono input only when manually triggered, stereo continuously, as in the structure diagram.
+- First version runs per module on its own detections. Decision recorded here on whether a single MCL scoring every module's detections (on the robot or on one module) is worth building.
 - Hook for the saved VSLAM map as a prior (used once Stage 10 exists).
 - A desktop C++ model of the whole filter, used to tune the observation model before building hardware.
 

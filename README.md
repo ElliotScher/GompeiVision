@@ -9,9 +9,9 @@
 
 COTS vision units like Limelight, and our own CPU version of GompeiVision, follow the same pattern: a USB or MIPI camera fills a frame buffer, a general-purpose CPU wakes up, copies the whole frame, and only then starts looking for AprilTags. That means at least one full frame of transfer delay, plus processing time that changes from frame to frame with OS scheduling, cache misses and the number of tags in view.
 
-GompeiVision runs on an **SoC FPGA**: one chip with FPGA logic, real-time cores and a Linux-capable ARM CPU sharing the same memory. The latency-critical work (camera capture, AprilTag detection, pose solving, MCL) runs in **hardware and on real-time cores**. Pixels are processed as they come off the sensor, so a tag's corners are found a millisecond or two after the last row of the tag is read out. The heavier, irregular work (object detection, TagSLAM, VSLAM, networking) runs on the **ARM CPU under Linux**, where we can use normal C++, WPILib's `ntcore` and existing libraries. The unit talks to the robot over the same NetworkTables contract we use today.
+GompeiVision runs on an **SoC FPGA**: one chip with FPGA logic, real-time cores and a Linux-capable ARM CPU sharing the same memory. The latency-critical work (camera capture, AprilTag detection, pose solving, VIO feature tracking) runs in **hardware and on real-time cores**. Pixels are processed as they come off the sensor, so a tag's corners are found a millisecond or two after the last row of the tag is read out. The heavier, irregular work (object detection, TagSLAM, the VIO back end, networking) runs on the **ARM CPU under Linux**, where we can use normal C++, WPILib's `ntcore` and existing libraries. The unit talks to the robot over the same NetworkTables contract we use today.
 
-The system is built from **stereo modules**. Each module is a self-contained, Limelight-sized unit (a few inches on each side) with exactly two global-shutter lenses, its own SoC FPGA and its own SSD. A robot carries as many modules as it needs. Each one detects tags, runs stereo VSLAM and TagSLAM, records its own video, and reports field-frame poses that the robot's pose estimator fuses.
+The system is built from **stereo modules**. Each module is a self-contained, Limelight-sized unit (a few inches on each side) with exactly two global-shutter lenses, its own SoC FPGA and its own SSD. A robot carries as many modules as it needs. Each one detects tags, runs stereo visual-inertial odometry (VIO) and TagSLAM, records its own video, and reports field-frame poses that the robot's pose estimator fuses.
 
 What we expect to gain, in order of importance:
 
@@ -29,9 +29,9 @@ What we expect to gain, in order of importance:
 | Camera capture, timestamps, frame routing | FPGA logic | MIPI CSI-2 receive, hardware trigger and timestamping are what FPGAs do best |
 | AprilTag (36h11) detection | FPGA logic | Streaming threshold → connected components → quad fit → decode. The main latency win and the hardest custom hardware |
 | Pose estimation (IPPE, SQPnP, tag angles, stereo) | Real-time cores | Tiny numeric problems; well under 1 ms, with no Linux scheduling in the way |
-| MCL | FPGA logic + real-time cores | Scoring thousands of particles in parallel suits hardware |
+| VIO feature tracking | FPGA logic | Corner detection and frame-to-frame tracking for both lenses at full frame rate |
 | Object detection | Prebuilt accelerator in FPGA logic, run from Linux | AMD's neural-network accelerator (Vitis AI DPU), used like a library. No custom accelerator to build |
-| TagSLAM, VSLAM, object localization | ARM CPU (Linux) | Iterative, memory-heavy work. VSLAM can build on existing open-source SLAM code |
+| TagSLAM, VIO back end, object localization | ARM CPU (Linux) | Iterative numeric work. The VIO back end can build on existing open-source VIO code |
 | NetworkTables, config, maps, setup stream | ARM CPU (Linux) | Uses WPILib's real `ntcore` library |
 | Video recording | Hardware video encoder + M.2 SSD | Both lenses, H.265, written to each module's own SSD |
 
@@ -50,9 +50,9 @@ The real risks are not technical limits. They are **people and time**: HDL skill
 
 The SoC FPGA has three kinds of compute, all sharing the same DDR memory:
 
-1. **FPGA logic (PL).** Capture, timestamps, frame routing, AprilTag detection, MCL particle scoring, optional FAST/ORB features for VSLAM, and the object-detection accelerator.
-2. **Real-time cores (RPU, Cortex-R5F, no Linux).** Pose solving (PnP, tag angles, stereo PnP), MCL resampling, and passing finished tag measurements to the publisher.
-3. **Application CPU (APU, Cortex-A53, Linux).** NetworkTables via `ntcore`, config and field layout, object-detection control and localization, TagSLAM, VSLAM back end, map storage, the setup-mode stream and video recording (through the chip's hardware encoder).
+1. **FPGA logic (PL).** Capture, timestamps, frame routing, AprilTag detection, feature detection and tracking for VIO, IMU sampling, and the object-detection accelerator.
+2. **Real-time cores (RPU, Cortex-R5F, no Linux).** Pose solving (PnP, tag angles, stereo PnP), CAN-FD messages, and passing finished tag measurements to the publisher.
+3. **Application CPU (APU, Cortex-A53, Linux).** NetworkTables via `ntcore`, config and field layout, object-detection control and localization, TagSLAM, VIO back end, map storage, the setup-mode stream and video recording (through the chip's hardware encoder).
 
 Rules:
 
@@ -77,9 +77,8 @@ This maps the macro design in [`GompeiVisionStructureDiagram.dot`](GompeiVisionS
 │        │                                                                           │
 │        ├─► [PL] AprilTag: threshold → CCL → quads → decode ─► [RPU] PnP, angles,   │
 │        │                                                       stereo PnP ──┐      │
-│        ├─► [PL] MCL particle scoring ─► [RPU] resampling ─► MCL pose ───────┤      │
 │        ├─► [PL] DPU accelerator ◄─ [APU] object detection + localization ───┤      │
-│        └─► [PL] FAST/ORB (optional) ─► [APU] VSLAM back end, geometric map ─┤      │
+│        └─► [PL] features + tracking ─► [APU] VIO back end (+ IMU) ──────────┤      │
 │                                        [APU] TagSLAM ─► refined tag map ────┤      │
 │                                                                             ▼      │
 │ [APU] Linux: ntcore publisher (real-time thread) · config · field layout          │
@@ -97,11 +96,11 @@ This diagram is one module. A robot carries several, each connected to the robot
 
 - [`src/`](src/): the current CPU pipeline (C++, OpenCV, AprilTag, ntcore). Still the competition system, the starting point for the golden models, and the first thing we run on the new board's ARM cores.
 - `model/`: C++ golden reference models for each hardware block, plus a frame-replay harness.
-- `rtl/`: SystemVerilog for the FPGA logic (capture, FrameBus, AprilTag, MCL scoring, features).
+- `rtl/`: SystemVerilog for the FPGA logic (capture, FrameBus, AprilTag, VIO features, CAN-FD).
 - `sim/`: Verilator + cocotb testbenches that compare RTL with `model/` on recorded frames.
 - `platform/`: Vivado block design, device tree, and the Linux image build.
-- `rpu/`: real-time core firmware (FreeRTOS or bare metal, OpenAMP/RPMsg): PnP, MCL resampling.
-- `apu/`: Linux C++ apps: NT publisher, config, object detection, TagSLAM, VSLAM, storage, setup stream.
+- `rpu/`: real-time core firmware (FreeRTOS or bare metal, OpenAMP/RPMsg): PnP, CAN-FD messages.
+- `apu/`: Linux C++ apps: NT publisher, config, object detection, TagSLAM, VIO, recording, storage, setup stream.
 - `ml/`: object-detection datasets, training and quantization scripts.
 - `hardware/`: custom carrier board (KiCad) and enclosure (FreeCAD).
 - `scripts/`: `bootstrap.sh` and `doctor.sh` for toolchain setup and checks.
@@ -117,6 +116,7 @@ The exact parts get confirmed in Stage 0b. The criteria and candidates are in [d
 - **Networking:** Gigabit Ethernet to the robot radio; optional CAN-FD fast path to SystemCore.
 - **Storage:** eMMC for the Linux image, config, network weights and saved maps (no SD card on the robot).
 - **Recording:** an M.2 2230 NVMe SSD in every module for video and logs.
+- **IMU:** an SPI gyro and accelerometer in every module, timestamped on the camera clock, for VIO and heading.
 - **Size:** about a Limelight, roughly 3.5–4.5 × 2.5–3 × 1.5–2 in, with the aluminum housing as the heatsink and a small fan.
 - **Power:** robot 12 V through a buck-boost regulator that holds through brownouts, with a fuse/breaker on the PDH, following the current FRC game manual.
 
@@ -146,9 +146,8 @@ The full plan is in [docs/PLAN.md](docs/PLAN.md), with per-stage detail in [docs
 - [ ] **6**: Stereo module (synced lens pair, stereo PnP) and multi-module fusion
 - [ ] **7**: Object detection (DPU) and object localization
 - [ ] **8**: TagSLAM and refined tag map storage
-- [ ] **9**: MCL localization
-- [ ] **10**: VSLAM
-- [ ] **11**: Module hardware: carrier board, enclosure, SSD and competition hardening
+- [ ] **9**: Stereo VIO
+- [ ] **10**: Module hardware: carrier board, enclosure, SSD and competition hardening
 
 ## Inspiration
 

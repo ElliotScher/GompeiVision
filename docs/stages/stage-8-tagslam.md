@@ -11,8 +11,8 @@ Estimate robot pose and refine the AprilTag map from tag detections and robot od
 - RobotPoseEstimate on PoseMeasurements; RefinedTagMap on a MapData topic.
 - Save and load the refined map to storage.
 - The same code builds on a desktop for testing on recorded datasets.
-- One instance per module, anchoring that module's VSLAM map and poses to the field frame.
-- Heading for pose disambiguation (see [PLAN.md](../PLAN.md#heading-and-pose-disambiguation)): RobotData carries heading and yaw rate, sent every robot loop. Optional heading-constrained single-tag solve on the [RPU], and optional onboard IMU with a quality-gated heading filter.
+- One instance per module, anchoring that module's VIO track and poses to the field frame.
+- Heading for pose disambiguation (see [PLAN.md](../PLAN.md#heading-and-pose-disambiguation)): RobotData carries heading and yaw rate, sent every robot loop. Optional heading-constrained single-tag solve on the [RPU], using the onboard IMU with a quality-gated heading filter.
 
 ## Exit criteria
 

@@ -9,33 +9,31 @@ digraph GompeiVisionStructureDiagram {
     rankdir=LR;
 
     subgraph cluster7 {
-        label = "Robot Code (roboRIO)";
+        label = "Robot Code (roboRIO / SystemCore)";
         RobotState;
         RobotData;
     }
 
     subgraph cluster0 {
-        label = "GompeiVision (Coprocessor)";
+        label = "GompeiVision Module (one per stereo pair; a robot carries several)";
 
         subgraph cluster1 {
-            label = "Capture Process";
+            label = "Capture";
 
-            MonoCameras;
             StereoCameras;
+            IMU;
 
-            MonoFrames;
             StereoFrames;
+            IMUSamples;
 
-            MonoCameras -> MonoFrames;
             StereoCameras -> StereoFrames;
+            IMU -> IMUSamples;
 
             subgraph cluster_framebus {
                 label = "FrameBus (Routing Layer)";
 
-                MonoFrameBus;
                 StereoFrameBus;
 
-                MonoFrames -> MonoFrameBus;
                 StereoFrames -> StereoFrameBus;
             }
         }
@@ -49,54 +47,39 @@ digraph GompeiVisionStructureDiagram {
             ObjectRecognition;
             ObjectLocalization;
 
-            // --- modality-aware routing ---
-            MonoFrameBus -> MonoTagPnP;
+            StereoFrameBus -> MonoTagPnP [label="each lens"];
             StereoFrameBus -> StereoTagPnP;
 
-            MonoFrameBus -> ObjectRecognition;
-            StereoFrameBus -> ObjectRecognition;
+            StereoFrameBus -> ObjectRecognition [style="dashed", label="color variant only"];
 
             ObjectRecognition -> ObjectLocalization;
         }
 
         subgraph cluster4 {
-            label = "Independent Estimation Systems (SLAM / Localization)";
+            label = "Independent Estimation Systems";
 
             TagSLAM;
             RobotPoseEstimate;
             RefinedTagMap;
 
-            VSLAM;
-            VSLAMPose;
-            LocalGeometricMap;
+            VIO;
+            VIOOdometry;
 
-            MCL;
-            MCLPose;
-
-            MonoFrameBus -> TagSLAM;
             StereoFrameBus -> TagSLAM;
-
-            MonoFrameBus -> VSLAM [style="dashed", label="manually triggered only"];
-            StereoFrameBus -> VSLAM;
-
-            MonoFrameBus -> MCL[style="dashed", label="manually triggered only"];
-            StereoFrameBus -> MCL;
+            StereoFrameBus -> VIO;
+            IMUSamples -> VIO;
 
             RobotData -> TagSLAM;
-            RobotData -> VSLAM;
-            RobotData -> MCL;
+            RobotData -> VIO [style="dashed", label="heading alignment"];
 
             TagSLAM -> RobotPoseEstimate;
             TagSLAM -> RefinedTagMap;
 
-            VSLAM -> VSLAMPose;
-            VSLAM -> LocalGeometricMap;
-
-            MCL -> MCLPose;
+            VIO -> VIOOdometry;
         }
 
         subgraph cluster5 {
-            label = "Vision Output (NetworkTables)";
+            label = "Vision Output (CAN-FD fast path + NetworkTables)";
 
             PoseMeasurements;
             ObjectData;
@@ -108,34 +91,28 @@ digraph GompeiVisionStructureDiagram {
             ObjectLocalization -> ObjectData;
 
             RobotPoseEstimate -> PoseMeasurements;
-            VSLAMPose -> PoseMeasurements;
-            MCLPose -> PoseMeasurements;
+            VIOOdometry -> PoseMeasurements;
 
             RefinedTagMap -> MapData;
         }
 
         subgraph cluster6 {
-            label = "Persistent Storage (Coprocessor)";
+            label = "Persistent Storage (Module)";
 
             MapStorage;
-            SavedVSLAMMap;
+            VideoRecording;
 
-            LocalGeometricMap -> MapStorage [
-                label="save VSLAM map"
+            RefinedTagMap -> MapStorage [
+                label="save refined tag map"
             ];
 
-            MapStorage -> SavedVSLAMMap [
-                label="load geometric prior"
-            ];
-
-            SavedVSLAMMap -> VSLAM [
-                label="initialization prior",
+            MapStorage -> TagSLAM [
+                label="load at boot",
                 style="dashed"
             ];
 
-            SavedVSLAMMap -> MCL [
-                label="initialization prior",
-                style="dashed"
+            StereoFrameBus -> VideoRecording [
+                label="VCU encode to M.2 SSD"
             ];
         }
     }
@@ -143,7 +120,7 @@ digraph GompeiVisionStructureDiagram {
 
     PoseMeasurements -> RobotState [
         style="dotted",
-        label="multi-source pose inputs"
+        label="tag poses, VIO deltas + velocity"
     ];
 
     ObjectData -> RobotState [
@@ -157,7 +134,6 @@ digraph GompeiVisionStructureDiagram {
     ];
 
     RobotState -> RobotData [
-        label="Heading\nModulePositions\nAprilTagMap",
-        lhead=cluster3
+        label="Heading\nModulePositions\nAprilTagMap\nRecordingControl"
     ];
 }

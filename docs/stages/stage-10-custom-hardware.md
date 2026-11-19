@@ -1,4 +1,4 @@
-# Stage 11: Module hardware: carrier board, enclosure and competition hardening
+# Stage 10: Module hardware: carrier board, enclosure and competition hardening
 
 ## Goal
 
@@ -6,7 +6,7 @@ Turn the dev-kit prototype into a robot-ready, Limelight-sized stereo module (a 
 
 ## Deliverables
 
-- KiCad carrier board for the K26 SOM (or the module chosen in Stage 0b): two MIPI camera connectors, Gigabit Ethernet PHY + magnetics, an M.2 2230 NVMe slot on the Zynq's PCIe lanes, a 12 V buck-boost regulator that holds through brownouts, trigger lines for stereo, status LEDs, debug header, and optional CAN-FD transceiver and IMU footprints. The module carries the chip and DDR, so we never lay out DDR ourselves.
+- KiCad carrier board for the K26 SOM (or the module chosen in Stage 0b): two MIPI camera connectors, Gigabit Ethernet PHY + magnetics, an M.2 2230 NVMe slot on the Zynq's PCIe lanes, a 12 V buck-boost regulator that holds through brownouts, trigger lines for stereo, status LEDs, debug header, a CAN-FD transceiver, and the IMU near the housing's mounting points. The module carries the chip and DDR, so we never lay out DDR ourselves.
 - FreeCAD aluminum enclosure that is also the heatsink (SoC thermally bonded to it), with the two lenses at the far ends of the front plate, closed against metal shavings, with filtered airflow. Chip temperature reported on the status topic. Frame grounding and ESD per the rules.
 - Camera links: short, enclosed MIPI flex cables from the camera boards to the carrier, with locking connectors.
 - Read-only root filesystem, brownout-tolerant boot, hardware watchdog, firmware/bitstream update over Ethernet with a fallback image.

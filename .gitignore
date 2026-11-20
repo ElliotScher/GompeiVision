@@ -2,3 +2,8 @@
 /*build*/
 /debs/
 /apt-cache/
+# Dev environment (scripts/bootstrap.sh, tools/selftest)
+/.venv/
+sim_build/
+__pycache__/
+results.xml

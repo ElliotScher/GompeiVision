@@ -1,0 +1,91 @@
+# Checks the dev-environment scripts (Stage 0a):
+# - lint: shellcheck.
+# - doctor: doctor runs to completion and reports what's there, on a hosted
+#   runner (some tools present) and a bare container (nothing present).
+# - bootstrap: from a bare image, bootstrap installs every track except ML
+#   (no Docker daemon in a container) and its closing doctor run passes; the
+#   cocotb self-test passes; a second run installs nothing.
+name: devenv
+
+on:
+  push:
+    paths:
+      - scripts/**
+      - tools/versions.env
+      - tools/selftest/**
+      - .github/workflows/devenv.yml
+      - .github/scripts/check-doctor.sh
+  pull_request:
+    paths:
+      - scripts/**
+      - tools/versions.env
+      - tools/selftest/**
+      - .github/workflows/devenv.yml
+      - .github/scripts/check-doctor.sh
+  schedule:
+    - cron: "0 6 * * 1" # Mondays: catches distro package and upstream URL drift
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: shellcheck
+        # SC2153: versions.env variables look like typos to shellcheck.
+        run: shellcheck -x -e SC2153 scripts/*.sh scripts/lib/*.sh .github/scripts/*.sh
+
+  # `expect`: ';'-separated regexes, each of which must match a line of output.
+  doctor:
+    name: doctor.sh (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Hosted runners have git, make, g++, cmake and Docker.
+          - name: ubuntu-24.04 runner
+            expect: "^common +git .* OK;^rpu +cmake .* OK;^ml +docker +.* OK"
+          # A bare container has none of the track tools.
+          - name: bare ubuntu:24.04
+            container: "ubuntu:24.04"
+            expect: "^hardware +verilator .* MISSING;^robot +java .* MISSING"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run doctor
+        env:
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          IFS=';' read -ra expects <<<"$EXPECT"
+          bash .github/scripts/check-doctor.sh "${expects[@]}"
+
+  bootstrap:
+    name: bootstrap.sh (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: ubuntu 24.04, container: "ubuntu:24.04" }
+          - { name: debian 13, container: "debian:13" }
+    env:
+      TRACKS: --hardware --rpu --apu --robot
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Bootstrap (exits non-zero unless its doctor run passes)
+        run: bash scripts/bootstrap.sh --yes $TRACKS
+      - name: cocotb self-test
+        run: PATH="$HOME/.local/bin:$PATH" bash scripts/doctor.sh --selftest --hardware
+      - name: Second run installs nothing
+        run: |
+          set +e
+          out="$(PATH="$HOME/.local/bin:$PATH" bash scripts/bootstrap.sh --yes $TRACKS 2>&1)"; code=$?
+          printf '%s\n' "$out"
+          [ "$code" = 0 ] || { echo "::error::second run exited $code"; exit 1; }
+          printf '%s\n' "$out" | grep -q 'Nothing to install' ||
+            { echo "::error::second run planned work: not idempotent"; exit 1; }

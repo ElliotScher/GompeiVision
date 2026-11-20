@@ -126,14 +126,21 @@ The exact parts get confirmed in Stage 0b. The criteria, candidates and cost est
 
 ## Development setup
 
-Not available yet. Stage 0a will add `scripts/bootstrap.sh` and `scripts/doctor.sh` to install and check:
+On Ubuntu 24.04+ or Debian 13 (WSL2 works on Windows), install the tools for the tracks you work on, then check them:
 
-- AMD Vivado and Vitis (free tier), and the Linux image tooling (PetaLinux/Yocto, or the vendor Ubuntu image for Kria)
-- Vitis AI (in its Docker container) for the object-detection model
-- Verilator, cocotb and Python 3 for simulation
-- AArch64 Linux and ARM bare-metal cross-compilers
-- CMake and a host C++ compiler for `model/` and the legacy pipeline
-- WPILib (Java and C++) for the robot library
+```sh
+scripts/bootstrap.sh --hardware --robot   # or --rpu, --apu, --ml; no flags = every track
+scripts/doctor.sh --selftest              # checks versions and runs a Verilator + cocotb test
+```
+
+The tracks are:
+- **Hardware:** Verilator, Verible, cocotb.
+- **RPU:** ARM bare-metal GCC.
+- **APU:** AArch64 Linux cross-compiler, CMake, Ninja.
+- **Robot:** JDK for WPILib 2027.
+- **ML:** Docker and the Vitis AI image.
+
+Versions are pinned in [`tools/versions.env`](tools/versions.env). The AMD tools (Vivado, Vitis, PetaLinux) can't be redistributed and are optional on student machines. See [docs/dev-setup.md](docs/dev-setup.md) for details, manual setup and troubleshooting.
 
 The legacy CPU pipeline still builds as before, inside the X86 or ARM Docker containers ([`Dockerfile.X86`](Dockerfile.X86), [`Dockerfile.ARM`](Dockerfile.ARM)), and packages as a `.deb`.
 
@@ -141,7 +148,7 @@ The legacy CPU pipeline still builds as before, inside the X86 or ARM Docker con
 
 The full plan is in [docs/PLAN.md](docs/PLAN.md), with per-stage detail in [docs/stages/](docs/stages/README.md).
 
-- [ ] **0a**: Dev environment and toolchain checks
+- [x] **0a**: Dev environment and toolchain checks
 - [ ] **0b**: Hardware confirmation, cost check, repo scaffolding and simulation CI
 - [ ] **1**: Latency baseline of the CPU system and golden models
 - [ ] **2**: Platform bring-up: Linux, ntcore, real-time cores, shared memory

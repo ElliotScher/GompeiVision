@@ -49,7 +49,7 @@ Legend: **[PL]** FPGA logic, **[RPU]** real-time Cortex-R5F cores, **[APU]** Cor
 |---|---|---|---|
 | MonoCameras, StereoCameras | [PL] MIPI CSI-2 RX (vendor IP), hardware trigger and exposure-strobe timestamp counter; sensor I2C config from [APU] | Easy–moderate | Feasible. Risk: MIPI bring-up and signal integrity |
 | MonoFrameBus, StereoFrameBus | [PL] AXI-Stream switch with per-consumer FIFOs and a DDR writer | Easy | Feasible |
-| MonoTagPnP (detection) | [PL] streaming threshold → connected components with per-component feature accumulators → quad finding (two candidates, chosen in Stage 1) → edge refinement → decode | Moderate–hard | Feasible. The core latency win, and the biggest piece of custom hardware. See [AprilTag detector](#apriltag-detector) |
+| MonoTagPnP (detection) | [PL] streaming threshold → connected components with per-component feature accumulators → quad finding (corner scorecard with an on-demand contour tracer, or AprilTag 3's boundary clustering; chosen in Stage 1) → edge refinement → decode. See [Detectors and their roles](#detectors-and-their-roles) | Moderate–hard | Feasible. The core latency win, and the biggest piece of custom hardware. See [AprilTag detector](#apriltag-detector) |
 | MonoTagPnP, StereoTagPnP (pose) | [RPU] IPPE-square and SQPnP, ported from the OpenCV calls in [`CameraPoseEstimator.cpp`](../src/cpp/estimator/CameraPoseEstimator.cpp) and [`SingleTagPoseEstimator.cpp`](../src/cpp/estimator/SingleTagPoseEstimator.cpp) | Easy–moderate | Feasible; expected well under 1 ms on an R5F with its double-precision FPU |
 | TagAngleCalculator | [RPU] undistort corners, convert to angles | Easy | Feasible |
 | Heading for single-tag disambiguation | Default: robot code picks between the two IPPE solutions using its own gyro history. Optional: heading-constrained solve on the [RPU], using the module's onboard IMU (required for VIO), timestamped by the [PL] | Easy (default) / moderate (IMU) | Feasible. Risk: heading offset handling and feedback loops. See [Heading and pose disambiguation](#heading-and-pose-disambiguation) |
@@ -231,7 +231,7 @@ About the size of a Limelight: roughly 3.5–4.5 × 2.5–3 × 1.5–2 in (estim
 | Linux image | PetaLinux/Yocto, or the vendor Ubuntu image for Kria, with PREEMPT_RT |
 | APU apps | C++20, CMake, WPILib `ntcore`/`wpimath` (same as [`src/`](../src/)), OpenCV, a factor-graph library for TagSLAM |
 | Object detection | Vitis AI (training and quantization in its Docker container) |
-| Golden models | C++ host build sharing code with [`src/`](../src/) and the AprilTag C library |
+| Golden models | C++ host build sharing code with [`src/`](../src/), the AprilTag C library, NAPA, OpenCV ArUco and ArUco Nano |
 | CI | GitHub Actions: lint (Verible), Verilator + cocotb sims, golden-model and APU unit tests. Bitstream builds run nightly or on a self-hosted runner, since Vivado is large |
 | Board and enclosure | KiCad, FreeCAD |
 
@@ -250,23 +250,58 @@ About the size of a Limelight: roughly 3.5–4.5 × 2.5–3 × 1.5–2 in (estim
 - Every frame is also written to a DDR ring buffer that PL, RPU and APU can all read. Consumers never wait for this copy; it's for decode and refinement read-back (below), object detection, setup-mode streaming and recording.
 - Consumers that fall behind drop frames and count drops; they never back-pressure the sensor.
 
+### Detectors and their roles
+
+The FPGA detector is the only detector on the live tag path. Four software detectors support it.
+
+| Detector | Runs on | Role |
+|---|---|---|
+| **FPGA streaming detector** ([below](#apriltag-detector)) | PL, plus RPU for repairs | The competition tag path: a tag finishes ~0.1 ms after the scan passes it, with fixed timing and no CPU use |
+| **NAPA** ([zwatx/NAPA](https://github.com/zwatx/NAPA), GPLv3) | APU | First working tag path on the module (Stage 3), live fallback, and a 1-in-N background cross-check in matches. Also the source of the scorecard-style quad finding, ID lookup, refinement and shape repairs |
+| **AprilTag 3 library** | Desktop (APU if needed) | Reference: golden model for threshold and blob labeling, and the parity baseline, since today's CPU pipeline uses it |
+| **OpenCV ArUco** | APU in setup mode, and desktop | Camera and stereo calibration with ChArUco boards (Stage 6); multi-scale threshold comparison in Stage 1 |
+| **ArUco Nano** | Desktop | Golden model for the contour tracer (4C); speed and accuracy comparison |
+
+- **NAPA on the A53s.** Its published benchmarks (by the author and forum users, not ours) report ~0.5 ms per 1080p frame on one i7 core and ~0.7–1.6 ms on a Raspberry Pi 5–class board. A rough guess for the A53s is 2–6 ms per lens frame; Stage 3 measures it. NAPA waits for full frames, so it's roughly 5–15 ms slower than the streaming detector, and two lenses at 120 FPS would take about 0.5–1.5 cores that VIO and TagSLAM need. That's why it's the fallback, not the primary.
+- **Fallback switch:** a config setting moves a module's tag path from the FPGA detector to NAPA without reflashing.
+- **Cross-check:** NAPA runs on every Nth frame (for example 1 in 10) and its IDs and corners are compared with the FPGA's. Mismatches are counted on the status topic, which catches FPGA bugs that would otherwise go unnoticed.
+- **Auto-labeling:** on the desktop, frames where AprilTag (full resolution), NAPA and ArUco agree become ground truth for Stage 1 datasets. Disagreements are flagged for a person; they're the hard cases worth keeping.
+- **Shared weaknesses:** NAPA and the corner scorecard both need the tag's white quiet zone, and both lose corner accuracy when motion blur is longer than about one tag cell. Keep exposure short for shooting on the move.
+- **Licensing:** NAPA is GPLv3, compatible with this repository's GPL-3.0.
+- GPU detectors aren't considered, since the module has no GPU.
+
 ### AprilTag detector
 
-Follows the AprilTag 3 algorithm used today ([`FiducialDetector.cpp`](../src/cpp/detector/FiducialDetector.cpp)) so results can be compared one to one.
+The front end follows the AprilTag 3 algorithm used today ([`FiducialDetector.cpp`](../src/cpp/detector/FiducialDetector.cpp)), so threshold and blob labeling can be compared bit for bit. After that the design departs from it: quad finding and ID lookup follow NAPA, the robust fallback follows ArUco, and everything is rebuilt to stream.
+
+| Stage | Origin |
+|---|---|
+| Threshold, blob labeling | AprilTag 3, streamed |
+| Quad finding 4B (main path) | NAPA (extreme points) |
+| Quad finding 4C (fallback) | ArUco (contour tracing) |
+| Quad finding 4A (option) | AprilTag 3 (boundary clustering + line fit) |
+| Refinement | AprilTag 3, with NAPA's outlier rejection |
+| Bit sampling, brightness model | AprilTag 3 |
+| ID lookup, error correction | NAPA |
+
+Each block is tested bit for bit against a C++ model of the same block. The whole detector is tested by tolerance against AprilTag 3 at full resolution and NAPA: same IDs, corners within ~0.1 px, and a detection rate at least as good.
 
 1. **Optional decimation** (like `quad_decimate`) in a line buffer. Full resolution costs no throughput in PL, so decimation only matters for label-table size.
 2. **Adaptive threshold:** per-tile min/max, dilated over neighboring tiles, using a few tile-rows of buffering. If the look-ahead matters, an option is to use the previous frame's tile statistics (zero added rows, slight lag when lighting changes fast).
 3. **Streaming connected components:** single-pass union-find labeling for black and white regions, with an equivalence table resolved during horizontal blanking, and label recycling. Each component carries a small **feature accumulator**, updated per pixel: area, bounding box and the extreme pixel in K directions (see 4B). Every field combines with a min, max or sum, so merging two components just merges their accumulators. A component **closes** when a row adds no pixels to it, and its accumulator is emitted right away, before the rest of the frame arrives.
-4. **Quad finding: two candidates, chosen in Stage 1** on recorded data. Cheap filters on the accumulator (area, bounding-box aspect, black/white ratio) run first, so most components never reach either path.
+4. **Quad finding: 4A, or 4B with the 4C tracer, chosen in Stage 1** on recorded data. Cheap filters on the accumulator run first (area, bounding-box aspect, and too dark overall, since every 36h11 code has at least 10 white cells), so most components never reach quad finding.
    - **4A. Boundary clustering + quad fit** (closest to the reference library). Pixels on black/white edges are grouped by their (black component, white component) pair. When both components close, the cluster goes to a fit engine: sort by angle, line-fit error from prefix sums, corner search. The first implementation runs the fit on the RPU; the hot loop moves to PL fit engines if the RPU can't keep up. This is the irregular part; hashing and memory layout decide feasibility.
-   - **4B. Corner scorecard** (cheaper, fully streaming). For each black component, the accumulator tracks the pixel farthest along each of K = 16 directions (the max of x·cosθ + y·sinθ). Each corner of a convex quad is the extreme point for a range of directions equal to 180° minus its interior angle, so K = 16 catches corners up to about 157°. When the component closes, merge near-duplicate extremes and keep the 4 that enclose the largest area. No edge points are stored or sorted. It relies on the tag's white quiet zone (true for 36h11). Components it can't handle (tag merged with dark background, partly occluded) go to the RPU for a 4A-style software fit from the frame store.
-5. **Edge refinement:** sample across each of the 4 edges between the approximate corners, find the gradient peak, least-squares fit each edge and intersect. This produces the subpixel corners for 4B, and improves 4A.
-6. **Decode:** closed-form square-to-quad homography (Heckbert's projective mapping: a few dozen multiplies and two divides, no linear solve). Sample the border and data cells, fit the black/white brightness model from the border, and threshold each bit. Match against the 587 codes × 4 rotations of 36h11 stored in block RAM, checking about 64 per clock cycle (XOR + popcount): roughly 40 cycles and a few thousand LUTs. A fully parallel matcher would cost on the order of 100k LUTs.
+   - **4B. Corner scorecard** (cheaper, fully streaming). For each black component, the accumulator tracks the pixel farthest along each of K = 16 directions (the max of x·cosθ + y·sinθ). Each corner of a convex quad is the extreme point for a range of directions equal to 180° minus its interior angle, so K = 16 catches corners up to about 157°. When the component closes, merge near-duplicate extremes and keep the 4 that enclose the largest area. No edge points are stored or sorted. It relies on the tag's white quiet zone (true for 36h11). Components that fail its sanity checks (blob much larger than its quad, implausible shape, too many separate extremes), which usually means a tag merged with dark background or partly hidden, go to 4C.
+   - **4C. On-demand contour tracer** (ArUco-style, only for 4B rejects). A small PL block walks the rejected blob's outline in the on-chip strip buffer (or DDR, for blobs taller than the buffer), then runs the same angle sort, line fit and corner search as 4A. Estimate 10–50 µs per tag, with only one blob's points in memory at a time and roughly 8–15k LUTs. Capped at a few candidates per frame; extras are dropped and counted.
+5. **Edge refinement:** only candidates that pass a quick decode on the rough quad are refined (NAPA's order), so text and texture are rejected before the expensive step. Sample across each of the 4 edges about every 1.5 px, find the edge (gradient centre for sharp edges, midpoint crossing for blurred ones), drop outlier samples so a short obstruction doesn't drag a corner, least-squares fit each edge and intersect. This produces the subpixel corners for 4B and 4C, and improves 4A.
+6. **Decode:** closed-form square-to-quad homography (Heckbert's projective mapping: a few dozen multiplies and two divides, no linear solve). Sample the border and data cells, fit the black/white brightness model from the border, and threshold each bit. Look up the ID NAPA's way: any code within 3 bit errors shares one of the payload's four 9-bit blocks exactly, so four lookups in 512-entry block-RAM tables narrow the 2,348 code/rotation candidates to a handful, which are then checked exactly. That takes a few clock cycles. A third bit error is allowed only when the wrong cells touch (glare, a finger), so random patterns don't match by chance.
 7. **Pixel read-back:** by the time a tag closes, its top rows have left the line buffers. Refinement and decode read from the on-chip strip buffer (see [Bandwidth and memory budget](#bandwidth-and-memory-budget)), falling back to the DDR frame store. Reads are small and local (bit sampling grid plus edge strips), so this costs microseconds.
 8. **Frame boundaries:** every block resets its per-frame state (labels, accumulators, tile statistics) when the start-of-frame sideband reaches it, so blocks can be working on different frames at the same time. Every result carries the frame ID. A frame-store slot isn't reused until all of its tags are decoded; if it would be, the remaining candidates are dropped and counted, never stalled.
 9. **Output:** tag ID, decision margin, Hamming distance and four subpixel corners in the TL/TR/BR/BL order the CPU code uses.
 
 Fixed-point widths for the homography and refinement come from the golden model's error budget (target: corners within 0.1 px of the CPU output).
+
+**Shape repairs (from NAPA, on the RPU):** for the few tags that need them, the RPU tries bowed sides (wide lenses), sides cut by the frame edge, a grey quiet zone, a side one cell out, clipped exposure, and blur/gamma shifts. Each repair is kept only if the tag still decodes to the same ID.
 
 ### Pose estimation (RPU)
 
@@ -403,7 +438,7 @@ Everything the robot controller receives from the modules is fully handled withi
 
 Each layer must pass before the next is trusted:
 
-1. **Golden models** (`model/`): C++ models of each PL and RPU block, built from the CPU code. For integer blocks the model defines the exact expected output.
+1. **Golden models** (`model/`): C++ models of each PL and RPU block, built from the CPU code, NAPA and ArUco Nano (see [Detectors and their roles](#detectors-and-their-roles)). For integer blocks the model defines the exact expected output.
 2. **Unit simulation:** cocotb + Verilator testbenches per PL block, compared with the golden model on synthetic and recorded frames. Integer blocks must match bit for bit; floating-point blocks must stay within a stated tolerance.
 3. **Frame-replay simulation:** recorded match and practice-field videos (captured with the CPU system) replayed through the full simulated pipeline, comparing detections and poses with the CPU output.
 4. **Hardware-in-the-loop:** recorded frames loaded into the DDR frame store from Linux and fed into the real PL pipeline in place of the sensor, so on-chip results can be compared frame by frame.
@@ -430,7 +465,8 @@ Each layer must pass before the next is trusted:
 | Electrical noise and brownouts on the robot | Medium | High | Buck-boost regulator that holds the input steady through ~7 V sags, brownout-tolerant boot, watchdog, read-only root filesystem, eMMC boot (no SD card), status topic |
 | Unit reboots mid-match (hit or brownout) and is blind while Linux boots | Medium | High | Tag path boots from the first-stage loader without Linux; fast path from the RPU; recovery time measured in Stage 10 |
 | MIPI flex cable cracks or works loose on the robot | Medium | High | Locked mounting and strain relief, short runs, spares; serializer links (GMSL/FPD-Link) for cameras away from the unit |
-| Corner scorecard (4B) misses tags that touch dark background or are occluded | Medium | Low | Measured in Stage 1; RPU software-fit fallback; or use 4A |
+| Corner scorecard (4B) misses tags that touch dark background or are occluded | Medium | Low | Measured in Stage 1; on-demand contour tracer (4C); or use 4A |
+| FPGA detector bug or bad bitstream at an event | Low | High | NAPA fallback by config switch; 1-in-N cross-check catches silent errors |
 | SystemCore's CAN-FD API or bus setup doesn't suit a custom device | Medium | Low | NT stays the contract; raw UDP as the alternative fast path |
 | Heading filter corrected by its own constrained-solve output (feedback loop) | Low | Medium | Only unconstrained, quality-gated multi-tag headings feed the filter |
 | Module overheats in a Limelight-sized housing (~12–20 W) | Medium | High | Housing as heatsink, filtered fan, temperature on the status topic, thermal test in Stage 10; lower VIO rate or recording FPS when hot |

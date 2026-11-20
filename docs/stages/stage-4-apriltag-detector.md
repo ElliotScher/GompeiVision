@@ -10,8 +10,9 @@ Each step is a separate RTL block with its own cocotb testbench against the Stag
 
 - [PL] decimation and adaptive threshold
 - [PL] streaming connected-components labeling with per-component feature accumulators (area, bounding box, K-direction extremes) and close detection
-- Quad finding as decided in Stage 1: 4A (boundary clustering by component pair, fit on the [RPU] first, then [PL] fit engines if the RPU can't keep up) and/or 4B ([PL] corner scorecard, with the [RPU] software fit as fallback for components it can't handle)
-- [PL] edge refinement and decode: closed-form homography and a parallel 36h11 code matcher, reading back from the on-chip strip buffer with DDR fallback
+- Quad finding as decided in Stage 1: 4A (boundary clustering by component pair, fit on the [RPU] first, then [PL] fit engines if the RPU can't keep up), or 4B ([PL] corner scorecard) with 4C ([PL] on-demand contour tracer) for the components 4B rejects
+- [PL] edge refinement and decode: quick decode before refinement, outlier-rejecting edge fits, closed-form homography and NAPA-style 9-bit block ID lookup, reading back from the on-chip strip buffer with DDR fallback
+- [RPU] NAPA-style shape repairs for the few tags that need them
 - Per-frame reset on the start-of-frame sideband, frame IDs on every result, and drop-and-count when a frame-store slot would be reused early
 - Output of ID, decision margin, Hamming distance and ordered subpixel corners into a shared-memory ring
 

@@ -8,7 +8,7 @@ Both of a module's cameras running as a hardware-synchronized stereo pair with S
 
 - [PL] two capture and tag pipelines, one per lens (shared logic or duplicated, based on the resource budget).
 - One trigger line for the pair, and a check that their timestamps match.
-- Stereo calibration flow (intrinsics + extrinsics) and storage.
+- Stereo calibration flow (intrinsics + extrinsics) with ChArUco boards and OpenCV, run in setup mode on the module or on a laptop from recorded frames, and storage.
 - [RPU] StereoTagPnP: triangulate matched corners, then joint PnP.
 - Module identity: the board ID sets NT topics and the CAN ID, so a module can be swapped in the pits with config following its mounting position.
 - Robot-side fusion reference code: each module's field-frame measurements fused in the pose estimator with their own timestamps and standard deviations, with all modules sharing one CAN-FD vision bus. See [Multiple modules](../PLAN.md#multiple-modules).

@@ -27,7 +27,7 @@ What we expect to gain, in order of importance:
 | Feature | Runs on | Notes |
 |---|---|---|
 | Camera capture, timestamps, frame routing | FPGA logic | MIPI CSI-2 receive, hardware trigger and timestamping are what FPGAs do best |
-| AprilTag (36h11) detection | FPGA logic | Streaming threshold → connected components → quad fit → decode. The main latency win and the hardest custom hardware |
+| AprilTag (36h11) detection | FPGA logic | Streaming threshold → connected components → quad fit → decode, combining ideas from AprilTag 3, NAPA and ArUco. The main latency win and the hardest custom hardware. NAPA on the ARM CPU is the fallback and cross-check |
 | Pose estimation (IPPE, SQPnP, tag angles, stereo) | Real-time cores | Tiny numeric problems; well under 1 ms, with no Linux scheduling in the way |
 | VIO feature tracking | FPGA logic | Corner detection and frame-to-frame tracking for both lenses at full frame rate |
 | Object detection | Prebuilt accelerator in FPGA logic, run from Linux | AMD's neural-network accelerator (Vitis AI DPU), used like a library. No custom accelerator to build |

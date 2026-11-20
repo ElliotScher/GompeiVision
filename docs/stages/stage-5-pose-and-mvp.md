@@ -10,6 +10,7 @@
 - [APU] real-time publisher thread sending `observations` packed exactly like [`OutputPublisher.cpp`](../../src/cpp/io/OutputPublisher.cpp), plus `connected`, `capture_fps` and `processing_fps`.
 - Decision, backed by measurements, on whether a fast path is needed, and which: raw UDP ([PL] Ethernet MAC + [RPU]) or CAN-FD to SystemCore ([PL] CAN-FD controller + [RPU], see [PLAN.md](../PLAN.md#can-fd-fast-path)).
 - Robot-side reference code: read every queued measurement each loop, pick between single-tag solutions using the gyro history, and fuse each measurement with its exposure timestamp, following the [one-loop robot contract](../PLAN.md#one-loop-robot-contract).
+- NAPA as the module's fallback detector (a config switch, no reflash) and a 1-in-N background cross-check against the FPGA detector, with mismatches on the status topic.
 
 ## Exit criteria
 
@@ -19,6 +20,7 @@
 - [ ] Tag-path latency unchanged (within a stated margin) while the APU is fully loaded.
 - [ ] Robot-side vision processing time per loop measured at the worst-case measurement count, with nothing carried to the next loop except pose estimator state.
 - [ ] 1-hour soak on the robot with no resets, dropped connections or missed frames.
+- [ ] Switching a module to the NAPA fallback works on the robot, and the cross-check mismatch rate on recorded matches is recorded.
 - [ ] Decision recorded: is the unit ready to be the competition system?
 
 ## Risks

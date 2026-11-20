@@ -13,6 +13,7 @@ Frames from a MIPI global-shutter sensor stream through the FrameBus with hardwa
 - [APU] access to the frame store (UIO or a small driver), and a tool to dump frames.
 - [APU] setup mode: MJPEG stream from the frame store over HTTP (or H.264 from the VCU), enabled by `setup_mode`.
 - `hardware_id` from physical port + board ID.
+- [APU] NAPA on the frame store as the module's first working tag path, publishing over the same NT and CAN-FD paths the FPGA detector will use.
 - [APU] video recording (see [PLAN.md](../PLAN.md#video-recording-vcu--apu)): VCU encode (side by side once Stage 6 adds the second lens), segmented files on the M.2 SSD, a per-frame metadata file, start/stop over NT, and match and raw dataset modes.
 - Sensor windowing (ROI) and lane-rate settings exposed in config, so readout time can be traded for field of view.
 
@@ -27,6 +28,7 @@ Frames from a MIPI global-shutter sensor stream through the FrameBus with hardwa
 - [ ] Recording runs for a full simulated match with no dropped frames, and a power cut mid-recording loses at most the last segment.
 - [ ] Recording metadata lines up with a robot WPILOG to the frame.
 - [ ] Tag-path timing unchanged while recording.
+- [ ] NAPA tag poses from the module reach robot code, and NAPA's time per frame on the A53s is measured and recorded.
 
 ## Risks
 

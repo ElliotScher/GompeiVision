@@ -8,119 +8,99 @@ digraph GompeiVisionStructureDiagram {
     node [shape=box];
     rankdir=LR;
 
-    subgraph cluster7 {
-        label = "Robot Code (roboRIO / SystemCore)";
-        RobotState;
-        RobotData;
-    }
-
     subgraph cluster0 {
-        label = "GompeiVision Module (one per stereo pair; a robot carries several)";
+        label = "GompeiVision Module (one lens; a robot carries several)";
 
         subgraph cluster1 {
             label = "Capture";
 
-            StereoCameras;
-            IMU;
+            Camera;
+            Frames;
 
-            StereoFrames;
-            IMUSamples;
-
-            StereoCameras -> StereoFrames;
-            IMU -> IMUSamples;
+            Camera -> Frames;
 
             subgraph cluster_framebus {
                 label = "FrameBus (Routing Layer)";
 
-                StereoFrameBus;
+                FrameBus;
 
-                StereoFrames -> StereoFrameBus;
+                Frames -> FrameBus;
             }
         }
 
         subgraph cluster2 {
-            label = "Per-Frame Processing (Pose Measurement Generation)";
+            label = "Per-Frame Processing";
 
-            MonoTagPnP;
-            StereoTagPnP;
+            TagDetection;
+            CornerOutput;
+            ModuleTagPnP;
 
             ObjectRecognition;
             ObjectLocalization;
 
-            StereoFrameBus -> MonoTagPnP [label="each lens"];
-            StereoFrameBus -> StereoTagPnP;
+            FrameBus -> TagDetection;
+            TagDetection -> CornerOutput [label="undistort"];
+            TagDetection -> ModuleTagPnP;
 
-            StereoFrameBus -> ObjectRecognition [style="dashed", label="color variant only"];
-
+            FrameBus -> ObjectRecognition [label="downscaled"];
             ObjectRecognition -> ObjectLocalization;
         }
 
-        subgraph cluster4 {
-            label = "Independent Estimation Systems";
-
-            TagSLAM;
-            RobotPoseEstimate;
-            RefinedTagMap;
-
-            VIO;
-            VIOOdometry;
-
-            StereoFrameBus -> TagSLAM;
-            StereoFrameBus -> VIO;
-            IMUSamples -> VIO;
-
-            RobotData -> TagSLAM;
-            RobotData -> VIO [style="dashed", label="heading alignment"];
-
-            TagSLAM -> RobotPoseEstimate;
-            TagSLAM -> RefinedTagMap;
-
-            VIO -> VIOOdometry;
-        }
-
         subgraph cluster5 {
-            label = "Vision Output (CAN-FD fast path + NetworkTables)";
+            label = "Vision Output";
 
-            PoseMeasurements;
-            ObjectData;
-            MapData;
+            TagCorners [label="TagCorners (CAN-FD)"];
+            ModulePoses [label="ModulePoses (NetworkTables)"];
+            ObjectData [label="ObjectData (NetworkTables)"];
 
-            MonoTagPnP -> PoseMeasurements;
-            StereoTagPnP -> PoseMeasurements;
-
+            CornerOutput -> TagCorners;
+            ModuleTagPnP -> ModulePoses;
             ObjectLocalization -> ObjectData;
-
-            RobotPoseEstimate -> PoseMeasurements;
-            VIOOdometry -> PoseMeasurements;
-
-            RefinedTagMap -> MapData;
         }
 
         subgraph cluster6 {
             label = "Persistent Storage (Module)";
 
-            MapStorage;
+            TagMapStorage;
             VideoRecording;
 
-            RefinedTagMap -> MapStorage [
-                label="save refined tag map"
-            ];
-
-            MapStorage -> TagSLAM [
-                label="load at boot",
-                style="dashed"
-            ];
-
-            StereoFrameBus -> VideoRecording [
+            FrameBus -> VideoRecording [
                 label="VCU encode to M.2 SSD"
             ];
         }
     }
 
+    subgraph cluster7 {
+        label = "Robot Code (SystemCore)";
 
-    PoseMeasurements -> RobotState [
+        RobotPnP [label="RobotPnP (all modules, gyro at capture time)"];
+        PoseEstimator;
+        RobotState;
+        RobotData;
+
+        RobotPnP -> PoseEstimator [label="addVisionMeasurement"];
+        PoseEstimator -> RobotState;
+        RobotState -> RobotData;
+        RobotData -> RobotPnP [label="gyro history, tag map,\nmodule positions", style="dashed"];
+    }
+
+    subgraph cluster8 {
+        label = "Offline (Desktop)";
+
+        TagSLAM;
+        RefinedTagMap;
+
+        TagSLAM -> RefinedTagMap;
+    }
+
+    TagCorners -> RobotPnP [
         style="dotted",
-        label="tag poses, VIO deltas + velocity"
+        label="corners every frame"
+    ];
+
+    ModulePoses -> RobotState [
+        style="dotted",
+        label="display / NT-only robots"
     ];
 
     ObjectData -> RobotState [
@@ -128,12 +108,26 @@ digraph GompeiVisionStructureDiagram {
         label="object poses"
     ];
 
-    MapData -> RobotState [
-        style="dotted",
-        label="refined apriltag map"
+    RobotData -> TagSLAM [
+        style="dashed",
+        label="logged corners + odometry (WPILOG)"
     ];
 
-    RobotState -> RobotData [
-        label="Heading\nModulePositions\nAprilTagMap\nRecordingControl"
+    VideoRecording -> TagSLAM [
+        style="dashed",
+        label="recording metadata"
+    ];
+
+    RefinedTagMap -> RobotData [
+        label="field layout"
+    ];
+
+    RobotData -> TagMapStorage [
+        label="config, calibration,\ntag map, recording control"
+    ];
+
+    TagMapStorage -> ModuleTagPnP [
+        label="load at boot",
+        style="dashed"
     ];
 }

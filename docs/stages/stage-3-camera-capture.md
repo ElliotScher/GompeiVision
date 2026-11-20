@@ -1,8 +1,8 @@
-# Stage 3: Camera capture, timestamps, FrameBus, setup stream
+# Stage 3: Camera capture, timestamps, FrameBus, calibration, setup stream, recording
 
 ## Goal
 
-Frames from a MIPI global-shutter sensor stream through the FrameBus with hardware exposure timestamps, are visible from Linux, can be viewed in setup mode, and are recorded to the module's SSD.
+Frames from the module's MIPI global-shutter sensor (OV9281 mono or OV9782 color) stream through the FrameBus with hardware exposure timestamps, are visible from Linux, can be viewed in setup mode, and are recorded to the module's SSD.
 
 ## Deliverables
 
@@ -12,9 +12,11 @@ Frames from a MIPI global-shutter sensor stream through the FrameBus with hardwa
 - [PL] FrameBus switch with per-consumer FIFOs, drop counters, and a DDR ring-buffer writer.
 - [APU] access to the frame store (UIO or a small driver), and a tool to dump frames.
 - [APU] setup mode: MJPEG stream from the frame store over HTTP (or H.264 from the VCU), enabled by `setup_mode`.
-- `hardware_id` from physical port + board ID.
-- [APU] NAPA on the frame store as the module's first working tag path, publishing over the same NT and CAN-FD paths the FPGA detector will use.
-- [APU] video recording (see [PLAN.md](../PLAN.md#video-recording-vcu--apu)): VCU encode (side by side once Stage 6 adds the second lens), segmented files on the M.2 SSD, a per-frame metadata file, start/stop over NT, and match and raw dataset modes.
+- `hardware_id` from the board ID.
+- [PL] debayer for the color sensor: a luma stream for the tag pipeline and RGB for the downscaler.
+- Camera calibration: ChArUco boards with OpenCV ArUco, run in setup mode on the module or on a laptop from recorded frames. Results go into the robot's config (`camera_matrix`, `distortion_coefficients`) and are cached on the module for boot.
+- [APU] NAPA on the frame store as the module's first working tag path, publishing module-side poses over NT (and corners over CAN-FD once Stage 5 adds them), the same paths the FPGA detector will use.
+- [APU] video recording (see [PLAN.md](../PLAN.md#video-recording-vcu--apu)): VCU encode, segmented files on the M.2 SSD, a per-frame metadata file, start/stop over NT, and match and raw dataset modes.
 - Sensor windowing (ROI) and lane-rate settings exposed in config, so readout time can be traded for field of view.
 
 ## Exit criteria
@@ -22,6 +24,7 @@ Frames from a MIPI global-shutter sensor stream through the FrameBus with hardwa
 - [ ] Sustained target resolution and FPS with zero dropped frames for 1 hour.
 - [ ] Exposure timestamp accuracy measured with the LED rig or a scope (target: under 50 µs).
 - [ ] Readout time measured at full frame and at a windowed height.
+- [ ] Calibration reprojection error recorded for each sensor and lens tested.
 - [ ] Setup-mode stream viewable in a browser and in the robot dashboard.
 - [ ] Changing exposure and gain from robot code takes effect within one frame period.
 - [ ] Recorded frames can be loaded into the frame store from Linux and replayed into the PL pipeline (for hardware-in-the-loop tests).

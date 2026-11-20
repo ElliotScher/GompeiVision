@@ -14,7 +14,8 @@ Each step is a separate RTL block with its own cocotb testbench against the Stag
 - [PL] edge refinement and decode: quick decode before refinement, outlier-rejecting edge fits, closed-form homography and NAPA-style 9-bit block ID lookup, reading back from the on-chip strip buffer with DDR fallback
 - [RPU] NAPA-style shape repairs for the few tags that need them
 - Per-frame reset on the start-of-frame sideband, frame IDs on every result, and drop-and-count when a frame-store slot would be reused early
-- Output of ID, decision margin, Hamming distance and ordered subpixel corners into a shared-memory ring
+- Output of ID, decision margin, Hamming distance and ordered subpixel corners into a shared-memory ring, read by the RPU for CAN-FD corner output (Stage 5)
+- Tag detection on the color sensor's luma stream, with corner accuracy compared against the mono sensor
 
 ## Exit criteria
 

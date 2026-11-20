@@ -2,12 +2,12 @@
 
 ## Goal
 
-Any team member can set up the toolchains for their track (hardware, real-time firmware, Linux apps, ML) on Linux (and Windows via WSL2) in one command, and check it with another.
+Any team member can set up the toolchains for their track (hardware, real-time firmware, Linux apps, robot library, ML) on Linux (and Windows via WSL2) in one command, and check it with another.
 
 ## Deliverables
 
 - `tools/versions.env` pinning Vivado/Vitis, the Linux image tooling, Vitis AI, Verilator, cocotb, Python, the AArch64 and ARM bare-metal cross-compilers, CMake and WPILib library versions.
-- `scripts/bootstrap.sh`: installs the open-source tools, with `--hardware`, `--rpu`, `--apu` and `--ml` flags so students only install what they need. Prints instructions for the AMD tools (which can't be redistributed).
+- `scripts/bootstrap.sh`: installs the open-source tools, with `--hardware`, `--rpu`, `--apu`, `--robot` and `--ml` flags so students only install what they need. Prints instructions for the AMD tools (which can't be redistributed).
 - `scripts/doctor.sh`: checks each tool and version, and reports optional ones.
 - `docs/dev-setup.md`: per-OS instructions and troubleshooting.
 - A "hello" cocotb test of a trivial counter, run by `doctor.sh --selftest`.

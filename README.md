@@ -9,55 +9,58 @@
 
 COTS vision units like Limelight, and our own CPU version of GompeiVision, follow the same pattern: a USB or MIPI camera fills a frame buffer, a general-purpose CPU wakes up, copies the whole frame, and only then starts looking for AprilTags. That means at least one full frame of transfer delay, plus processing time that changes from frame to frame with OS scheduling, cache misses and the number of tags in view.
 
-GompeiVision runs on an **SoC FPGA**: one chip with FPGA logic, real-time cores and a Linux-capable ARM CPU sharing the same memory. The latency-critical work (camera capture, AprilTag detection, pose solving, VIO feature tracking) runs in **hardware and on real-time cores**. Pixels are processed as they come off the sensor, so a tag's corners are found a millisecond or two after the last row of the tag is read out. The heavier, irregular work (object detection, TagSLAM, the VIO back end, networking) runs on the **ARM CPU under Linux**, where we can use normal C++, WPILib's `ntcore` and existing libraries. The unit talks to the robot over the same NetworkTables contract we use today.
+GompeiVision runs on an **SoC FPGA**: one chip with FPGA logic, real-time cores and a Linux-capable ARM CPU sharing the same memory. The latency-critical work (camera capture, AprilTag detection, corner output) runs in **hardware and on real-time cores**. Pixels are processed as they come off the sensor, so a tag's corners are found a millisecond or two after the last row of the tag is read out, and go straight to the robot over **CAN-FD**. The robot controller (SystemCore) solves the pose, where it already has the gyro, the tag map and every camera's mounting position. The heavier, irregular work (object detection, networking, recording) runs on the module's **ARM CPU under Linux**, where we can use normal C++, WPILib's `ntcore` and existing libraries. The module also publishes the same NetworkTables topics we use today.
 
-The system is built from **stereo modules**. Each module is a self-contained, Limelight-sized unit (a few inches on each side) with exactly two global-shutter lenses, its own SoC FPGA and its own SSD. A robot carries as many modules as it needs. Each one detects tags, runs stereo visual-inertial odometry (VIO) and TagSLAM, records its own video, and reports field-frame poses that the robot's pose estimator fuses.
+The system is built from **single-lens modules**, one product made as cheaply as we can. Each module is a self-contained, Limelight-sized unit (a few inches on each side) with one global-shutter camera, a Kria K26 SoC FPGA, built-in object detection and its own SSD, in a housing we machine ourselves, for roughly $400–580. A robot carries as many modules as it needs, and the robot fuses all of their tag corners.
 
 What we expect to gain, in order of importance:
 
 1. **Deterministic, low-jitter latency.** The tag path has a fixed timing budget, so the time from exposure to measurement is nearly constant and can be compensated exactly on the robot.
 2. **Exact hardware timestamps.** The FPGA triggers the sensor and records the start of exposure in hardware. No guessing from a driver callback.
-3. **Lower absolute latency.** We estimate exposure + readout + ~2–3 ms, compared with an estimated 20–40 ms for the USB/CPU path. Both figures get *measured* in Stage 1 before we believe them.
-4. **Higher FPS and onboard stereo**, with a hardware-synchronized lens pair in every module, and more cameras by adding modules.
+3. **Lower absolute latency.** We estimate exposure + readout + ~1.5–3 ms to corners at the robot, compared with an estimated 20–40 ms for the USB/CPU path. Both figures get *measured* in Stage 1 before we believe them.
+4. **Better pose solves on the robot,** using every module's corners and the live gyro in one place, plus object detection and recording on every module at a lower cost than COTS units with object detection.
 
 ## Is this feasible?
 
-**Yes.** Each block runs on the part of the chip that suits it, so nothing has to be forced into hardware:
+**Yes.** Each block runs on the part of the system that suits it, so nothing has to be forced into hardware:
 
 | Feature | Runs on | Notes |
 |---|---|---|
 | Camera capture, timestamps, frame routing | FPGA logic | MIPI CSI-2 receive, hardware trigger and timestamping are what FPGAs do best |
 | AprilTag (36h11) detection | FPGA logic | Streaming threshold → connected components → quad fit → decode, combining ideas from AprilTag 3, NAPA and ArUco. The main latency win and the hardest custom hardware. NAPA on the ARM CPU is the fallback and cross-check |
-| Pose estimation (IPPE, SQPnP, tag angles, stereo) | Real-time cores | Tiny numeric problems; well under 1 ms, with no Linux scheduling in the way |
-| VIO feature tracking | FPGA logic | Corner detection and frame-to-frame tracking for both lenses at full frame rate |
-| Object detection | Prebuilt accelerator in FPGA logic, run from Linux | AMD's neural-network accelerator (Vitis AI DPU), used like a library. No custom accelerator to build |
-| TagSLAM, VIO back end, object localization | ARM CPU (Linux) | Iterative numeric work. The VIO back end can build on existing open-source VIO code |
-| NetworkTables, config, maps, setup stream | ARM CPU (Linux) | Uses WPILib's real `ntcore` library |
-| Video recording | Hardware video encoder + M.2 SSD | Both lenses, H.265, written to each module's own SSD |
+| Corner output | Real-time cores + CAN-FD | Undistorted tag corners sent to SystemCore within microseconds, with no Linux in the way |
+| Pose estimation (IPPE, multi-tag, heading-constrained) | Robot code on SystemCore | Small numeric problems, tens of µs per tag, with the robot's gyro and every module's corners. The module also solves its own pose for NetworkTables |
+| Object detection | Prebuilt accelerator in FPGA logic, run from Linux | AMD's neural-network accelerator (Vitis AI DPU), built into every module. No custom accelerator to build |
+| Object localization | ARM CPU (Linux) | Ground-plane projection |
+| NetworkTables, config, setup stream | ARM CPU (Linux) | Uses WPILib's real `ntcore` library |
+| Video recording | Hardware video encoder + M.2 SSD | H.265, written to each module's own SSD |
+| TagSLAM | Desktop, from logs | Offline field calibration: refines the tag map from every module's logged corners |
 
 The real risks are not technical limits. They are **people and time**: HDL skills are rare on student teams, the AprilTag hardware takes several months to a season, and debugging hardware is slower than debugging C++. The full analysis, latency budget and risk register are in [docs/PLAN.md](docs/PLAN.md).
 
 ## Design principles
 
 - **Stream, don't buffer.** The tag path never waits for a full frame. Blocks pass pixels and detections over AXI-Stream as they're produced.
-- **Hardware for the fast path, Linux for the rest.** The tag path is FPGA logic plus real-time cores. Linux only handles the final publish step on that path, in a real-time thread.
-- **Same contract as today.** The unit speaks the NetworkTables topics the CPU version uses (`/cameras/<hardware_id>/config`, `/field/tag_N`, `/cameras/<hardware_id>/output/observations`), so robot code doesn't change.
+- **Hardware for the fast path, Linux for the rest.** The tag path is FPGA logic plus real-time cores, straight to CAN-FD. Linux never touches it.
+- **Solve where the state is.** Pose solving needs the gyro, tag map and camera positions, which live on the robot, so PnP runs in robot code. The module sends corners, quality and timing.
+- **One loop on the robot.** Everything a module sends is used in the loop it arrives in and then dropped; only the pose estimator keeps history.
+- **Same contract as today.** The module also speaks the NetworkTables topics the CPU version uses (`/cameras/<hardware_id>/config`, `/field/tag_N`, `/cameras/<hardware_id>/output/observations`), so existing code and dashboards keep working.
 - **Golden-model parity.** Every hardware block has a C++ reference model (starting from the code in [`src/`](src/)). Simulations must match it bit for bit, or within a documented tolerance for floating-point work.
-- **Measure before claiming.** Latency numbers in these docs are estimates until a stage's test rig measures them.
-- **Independent pipelines.** Each camera pipeline and estimator can fail or be restarted without affecting the others. A crash in a Linux process never stops tag detection.
+- **Measure before claiming.** Latency and cost numbers in these docs are estimates until a stage measures them.
+- **Independent pipelines.** Each module, and each block on it, can fail or be restarted without affecting the others. A crash in a Linux process never stops tag detection.
 
 ## Where each block runs
 
-The SoC FPGA has three kinds of compute, all sharing the same DDR memory:
+The SoC FPGA has three kinds of compute, all sharing the same DDR memory, and the robot controller adds a fourth:
 
-1. **FPGA logic (PL).** Capture, timestamps, frame routing, AprilTag detection, feature detection and tracking for VIO, IMU sampling, and the object-detection accelerator.
-2. **Real-time cores (RPU, Cortex-R5F, no Linux).** Pose solving (PnP, tag angles, stereo PnP), CAN-FD messages, and passing finished tag measurements to the publisher.
-3. **Application CPU (APU, Cortex-A53, Linux).** NetworkTables via `ntcore`, config and field layout, object-detection control and localization, TagSLAM, VIO back end, map storage, the setup-mode stream and video recording (through the chip's hardware encoder).
+1. **FPGA logic (PL).** Capture, timestamps, frame routing, AprilTag detection, the downscaler and the object-detection accelerator, and the CAN-FD controller.
+2. **Real-time cores (RPU, Cortex-R5F, no Linux).** Corner undistortion, CAN-FD corner frames, and module-side PnP for NetworkTables.
+3. **Application CPU (APU, Cortex-A53, Linux).** NetworkTables via `ntcore`, config and field layout, object-detection control and localization, storage, the setup-mode stream and video recording (through the chip's hardware encoder).
+4. **Robot controller (SystemCore).** PnP over every module's corners, heading-constrained solves and the pose estimator, in our robot library.
 
 Rules:
 
-- **The tag path never waits on ordinary Linux work.** It only reaches Linux for the final publish, in a high-priority real-time thread. Measurement *time* always comes from the hardware exposure timestamp, so delivery jitter never corrupts it.
-- **If publish jitter is measured too high, the tag path gets its own path that skips Linux,** driven by the real-time cores: raw UDP through a small Ethernet MAC in the FPGA logic, or CAN-FD on a dedicated SystemCore bus.
+- **The tag path never waits on Linux.** Capture → detection → corners → CAN-FD runs in FPGA logic and on the real-time cores. Measurement *time* always comes from the hardware exposure timestamp, so delivery jitter never corrupts it.
 - **The tag path boots without Linux,** so after a brownout it's back within seconds while Linux is still starting.
 - **Every block exchanges messages in one versioned format** (the FrameBus messages), passed through shared memory. Blocks can move between tiers without changes upstream or downstream.
 - **A block moves only after a stage measures it missing its budget**, and the stage doc records the measurement.
@@ -67,58 +70,59 @@ Rules:
 This maps the macro design in [`GompeiVisionStructureDiagram.dot`](GompeiVisionStructureDiagram.dot) onto the chip. `[PL]` is FPGA logic, `[RPU]` the real-time cores, `[APU]` the Linux CPU.
 
 ```
- Stereo pair: 2 MIPI CSI-2 global-shutter sensors on one hardware trigger
+ One MIPI CSI-2 global-shutter sensor (mono or color)
         │  trigger + exposure strobe
         ▼
-┌───────────────────────── SoC FPGA (e.g. Zynq UltraScale+) ─────────────────────────┐
-│ [PL] Capture: CSI-2 RX · exposure timestamp · line buffers                         │
-│        │                                                                           │
-│ [PL] FrameBus: AXI-Stream router ──► shared DDR frame store                        │
-│        │                                                                           │
-│        ├─► [PL] AprilTag: threshold → CCL → quads → decode ─► [RPU] PnP, angles,   │
-│        │                                                       stereo PnP ──┐      │
-│        ├─► [PL] DPU accelerator ◄─ [APU] object detection + localization ───┤      │
-│        └─► [PL] features + tracking ─► [APU] VIO back end (+ IMU) ──────────┤      │
-│                                        [APU] TagSLAM ─► refined tag map ────┤      │
-│                                                                             ▼      │
-│ [APU] Linux: ntcore publisher (real-time thread) · config · field layout          │
-│              maps (eMMC) · M.2 recording (VCU) · setup stream                      │
-└──────────────────────────────────────┬─────────────────────────────────────────────┘
-                                       │ GbE
-                                       ▼
-   Robot radio ─► roboRIO / SystemCore: RobotState
-                  ◄─ RobotData (heading, module positions, tag map)
+┌──────────────────────────── SoC FPGA (Kria K26, Zynq UltraScale+) ─────────────────────────────┐
+│ [PL] Capture: CSI-2 RX · exposure timestamp · line buffers                                     │
+│        │                                                                                       │
+│ [PL] FrameBus: AXI-Stream router ──► shared DDR frame store                                    │
+│        │                                                                                       │
+│        ├─► [PL] AprilTag: threshold → CCL → quads → decode ─► [RPU] corners ──────────┐        │
+│        │                         [RPU] module-side PnP (same detections) ───┐         │        │
+│        └─► [PL] downscaler → DPU ◄─ [APU] object detection + localization ──┤         │        │
+│                                                                             ▼         │        │
+│ [APU] Linux: ntcore · config · field layout · M.2 recording (VCU) · setup stream      │        │
+└─────────────────────────────────────────────────────────────────────────────┬─────────┬────────┘
+                                                                              │         │
+                                             GbE (NT: poses, objects, status) │         │ CAN-FD (tag corners)
+                                                                              ▼         ▼
+   SystemCore robot code: robot library (PnP over all modules, gyro at capture time)
+                          → pose estimator · RobotState
 ```
 
-This diagram is one module. A robot carries several, each connected to the robot by Ethernet and CAN-FD, and the robot's pose estimator fuses their field-frame poses.
+This diagram is one module. A robot carries several, all on one dedicated CAN-FD bus and the robot's Ethernet. Robot code reads every module's corners each loop, solves the poses and fuses them.
 
 ## Repository layout (planned)
 
 - [`src/`](src/): the current CPU pipeline (C++, OpenCV, AprilTag, ntcore). Still the competition system, the starting point for the golden models, and the first thing we run on the new board's ARM cores.
 - `model/`: C++ golden reference models for each hardware block, plus a frame-replay harness.
-- `rtl/`: SystemVerilog for the FPGA logic (capture, FrameBus, AprilTag, VIO features, CAN-FD).
+- `rtl/`: SystemVerilog for the FPGA logic (capture, FrameBus, AprilTag, downscaler, CAN-FD).
 - `sim/`: Verilator + cocotb testbenches that compare RTL with `model/` on recorded frames.
 - `platform/`: Vivado block design, device tree, and the Linux image build.
-- `rpu/`: real-time core firmware (FreeRTOS or bare metal, OpenAMP/RPMsg): PnP, CAN-FD messages.
-- `apu/`: Linux C++ apps: NT publisher, config, object detection, TagSLAM, VIO, recording, storage, setup stream.
+- `rpu/`: real-time core firmware (FreeRTOS or bare metal, OpenAMP/RPMsg): corner output, CAN-FD, module-side PnP.
+- `apu/`: Linux C++ apps: NT publisher, config, object detection, recording, storage, setup stream.
+- `robot/`: the robot library (Java, optional C++ core over JNI): CAN-FD reader, PnP, heading-constrained and multi-module solves.
 - `ml/`: object-detection datasets, training and quantization scripts.
-- `hardware/`: custom carrier board (KiCad) and enclosure (FreeCAD).
+- `tools/tagslam/`: the offline TagSLAM field-calibration tool.
+- `hardware/`: custom carrier and camera boards (KiCad) and the machined enclosure (FreeCAD).
 - `scripts/`: `bootstrap.sh` and `doctor.sh` for toolchain setup and checks.
 - `tools/versions.env`: pinned toolchain versions.
 - [`docs/`](docs/): [the plan](docs/PLAN.md), [stage specs](docs/stages/README.md) and [the legacy CPU docs](docs/legacy-cpu-pipeline.md).
 
 ## Hardware summary (target)
 
-The exact parts get confirmed in Stage 0b. The criteria and candidates are in [docs/PLAN.md](docs/PLAN.md#hardware).
+The exact parts get confirmed in Stage 0b. The criteria, candidates and cost estimate are in [docs/PLAN.md](docs/PLAN.md#hardware).
 
-- **SoC FPGA:** AMD Zynq UltraScale+ MPSoC (quad Cortex-A53, dual Cortex-R5F, FPGA logic, shared DDR4). We prototype on an off-the-shelf **Kria K26** system-on-module and dev kit, and later design our own small carrier board for the same module, one per stereo module.
-- **Cameras:** global-shutter MIPI CSI-2 sensors (MIPI rather than USB, so rows stream straight into the FPGA logic as they're read out). Each module has exactly two: a monochrome (OV9281-class) stereo pair on one hardware trigger, at the far ends of the module for the widest baseline. Object detection uses a module variant whose pair is color global shutter (AR0234-class).
-- **Networking:** Gigabit Ethernet to the robot radio; optional CAN-FD fast path to SystemCore.
-- **Storage:** eMMC for the Linux image, config, network weights and saved maps (no SD card on the robot).
+- **SoC FPGA:** an AMD **Kria K26** system-on-module (Zynq UltraScale+ EV: quad Cortex-A53, dual Cortex-R5F, FPGA logic, hardware video encoder, shared DDR4). We prototype on the off-the-shelf dev kit, then design our own small carrier board for the same module.
+- **Camera:** one global-shutter MIPI CSI-2 sensor per module (MIPI rather than USB, so rows stream straight into the FPGA logic as they're read out): OV9281 mono or OV9782 color at 1280×800 and 120 FPS, with AR0234 (1920×1200) as an upgrade. Our own small camera boards and tested M12 lenses.
+- **Object detection:** built into every module, on the FPGA's DPU accelerator.
+- **Networking:** CAN-FD to SystemCore for tag corners; Gigabit Ethernet for NetworkTables, config, video and updates.
+- **Storage:** eMMC for the Linux image, config, network weights and the tag map (no SD card on the robot).
 - **Recording:** an M.2 2230 NVMe SSD in every module for video and logs.
-- **IMU:** an SPI gyro and accelerometer in every module, timestamped on the camera clock, for VIO and heading.
-- **Size:** about a Limelight, roughly 3.5–4.5 × 2.5–3 × 1.5–2 in, with the aluminum housing as the heatsink and a small fan.
+- **Size:** about a Limelight, roughly 3.5 × 2.5 × 1.5 in, in an aluminum housing machined on our own mill that is also the heatsink.
 - **Power:** robot 12 V through a buck-boost regulator that holds through brownouts, with a fuse/breaker on the PDH, following the current FRC game manual.
+- **Cost:** roughly $400–580 per module (estimate).
 
 ## Development setup
 
@@ -129,6 +133,7 @@ Not available yet. Stage 0a will add `scripts/bootstrap.sh` and `scripts/doctor.
 - Verilator, cocotb and Python 3 for simulation
 - AArch64 Linux and ARM bare-metal cross-compilers
 - CMake and a host C++ compiler for `model/` and the legacy pipeline
+- WPILib (Java and C++) for the robot library
 
 The legacy CPU pipeline still builds as before, inside the X86 or ARM Docker containers ([`Dockerfile.X86`](Dockerfile.X86), [`Dockerfile.ARM`](Dockerfile.ARM)), and packages as a `.deb`.
 
@@ -137,17 +142,16 @@ The legacy CPU pipeline still builds as before, inside the X86 or ARM Docker con
 The full plan is in [docs/PLAN.md](docs/PLAN.md), with per-stage detail in [docs/stages/](docs/stages/README.md).
 
 - [ ] **0a**: Dev environment and toolchain checks
-- [ ] **0b**: Hardware confirmation, repo scaffolding and simulation CI
+- [ ] **0b**: Hardware confirmation, cost check, repo scaffolding and simulation CI
 - [ ] **1**: Latency baseline of the CPU system and golden models
 - [ ] **2**: Platform bring-up: Linux, ntcore, real-time cores, shared memory
-- [ ] **3**: Camera capture, hardware timestamps, FrameBus, setup-mode stream and video recording
+- [ ] **3**: Camera capture, hardware timestamps, FrameBus, calibration, setup-mode stream and video recording
 - [ ] **4**: Streaming AprilTag detector in FPGA logic
-- [ ] **5**: Pose estimation and **MVP: output parity with the CPU pipeline**
-- [ ] **6**: Stereo module (synced lens pair, stereo PnP) and multi-module fusion
+- [ ] **5**: CAN-FD corners, robot-side PnP and **MVP: output parity with the CPU pipeline**
+- [ ] **6**: Multiple modules: fusion and joint solves on the robot
 - [ ] **7**: Object detection (DPU) and object localization
-- [ ] **8**: TagSLAM and refined tag map storage
-- [ ] **9**: Stereo VIO
-- [ ] **10**: Module hardware: carrier board, enclosure, SSD and competition hardening
+- [ ] **8**: TagSLAM field calibration
+- [ ] **9**: Module hardware: carrier and camera boards, machined enclosure, SSD and competition hardening
 
 ## Inspiration
 

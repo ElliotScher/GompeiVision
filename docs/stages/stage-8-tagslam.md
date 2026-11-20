@@ -1,26 +1,25 @@
-# Stage 8: TagSLAM and refined tag map
+# Stage 8: TagSLAM field calibration
 
 ## Goal
 
-Estimate robot pose and refine the AprilTag map from tag detections and robot odometry, and publish a refined map.
+A desktop tool that refines the AprilTag map for a specific field from logged module corners and robot odometry, so robot code and the modules solve against where the tags really are.
 
 ## Deliverables
 
-- RobotData input topic (heading, module positions) from robot code, placed in shared memory for other blocks.
-- [APU] fixed-lag factor-graph smoother using an existing library: reprojection, odometry and field-layout prior factors.
-- RobotPoseEstimate on PoseMeasurements; RefinedTagMap on a MapData topic.
-- Save and load the refined map to storage.
-- The same code builds on a desktop for testing on recorded datasets.
-- One instance per module, anchoring that module's VIO track and poses to the field frame.
-- Heading for pose disambiguation (see [PLAN.md](../PLAN.md#heading-and-pose-disambiguation)): RobotData carries heading and yaw rate, sent every robot loop. Optional heading-constrained single-tag solve on the [RPU], using the onboard IMU with a quality-gated heading filter.
+- `tools/tagslam/`: a factor graph over robot poses and tag landmarks, built on an existing factor-graph library, with reprojection factors from logged corners (all modules), odometry factors from the robot's WPILOG, and priors from the official field layout.
+- Log import from the robot's WPILOG (CAN-FD corners as read by the robot library) and the modules' recording metadata.
+- A field-calibration procedure: drive a set path on a new field (practice field or event field during calibration time), run the tool, review the per-tag changes.
+- Output: a refined field layout loaded into robot code, and sent to the modules over `/field/tag_<id>` for module-side PnP. Saved on the module's eMMC for boot.
+- A report per run: tags that moved, by how much, and the residual error.
+- Optional, only if it proves useful: running the same code on the APU at normal priority for live map refinement.
 
 ## Exit criteria
 
 - [ ] On recorded datasets, the refined map is closer to surveyed ground truth than the official layout when tags have been moved or mounted badly.
-- [ ] Update rate and latency measured and recorded (target: pose ≥10 Hz, map ≥1 Hz).
-- [ ] Running TagSLAM doesn't change tag-path latency.
-- [ ] If the heading-constrained solve is built: single-tag pose error on recorded fast-turn datasets compared with robot-side disambiguation.
+- [ ] Robot-library pose error on a held-out dataset is lower with the refined map than with the official one.
+- [ ] The field-calibration procedure runs in under 15 minutes from driving to a loaded map.
 
 ## Risks
 
-- The A53s may be too slow for the window size we want. Shrink the window or lower the update rate, and record the measurement here.
+- Bad odometry (wheel slip) during the calibration drive. Drive slowly, and weight odometry factors accordingly.
+- A refined map that's wrong is worse than the official one. Keep the official layout as the default and require a review step before loading a refined map.

@@ -32,7 +32,8 @@ namespace gv::model {
 
 struct QuadParams {
   double merge_distance = 1.5;  // pixels
-  double max_outside = 1.5;     // pixels, or this fraction of the mean side if larger:
+  double max_outside = 2.0;     // pixels, or this fraction of the mean side if larger
+                                // (1.5 sent 18% of 20-40 px tags to 4C; 2.0 sends 4%):
   double max_outside_frac = 0.05;
   double min_fill = 0.25;       // blob area / quad area
   double max_fill = 0.95;

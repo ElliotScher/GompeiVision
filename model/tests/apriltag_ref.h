@@ -12,7 +12,9 @@
 #include "common/image_u8.h"
 #include "common/unionfind.h"
 #include "common/workerpool.h"
+#include "gv/model/detector.h"
 #include "gv/model/image.h"
+#include "tag36h11.h"
 
 extern "C" {
 image_u8_t* threshold(apriltag_detector_t* td, image_u8_t* im);
@@ -80,6 +82,32 @@ inline std::vector<uint32_t> ref_components(const model::Image8& thresholded, in
   }
   unionfind_destroy(uf);
   return label;
+}
+
+// AprilTag as the CPU pipeline runs it (refine_edges, default sharpening),
+// with corners remapped to TL, TR, BR, BL exactly as FiducialDetector does.
+inline std::vector<model::Detection> apriltag_detect(const model::Image8& img, float decimate) {
+  static apriltag_family_t* fam = tag36h11_create();
+  apriltag_detector_t* td = apriltag_detector_create();
+  apriltag_detector_add_family(td, fam);
+  td->quad_decimate = decimate;
+  td->nthreads = 1;
+  td->refine_edges = true;
+  image_u8_t v = view(img);
+  zarray_t* dets = apriltag_detector_detect(td, &v);
+  std::vector<model::Detection> out;
+  for (int i = 0; i < zarray_size(dets); ++i) {
+    apriltag_detection_t* d;
+    zarray_get(dets, i, &d);
+    model::Detection x;
+    x.id = d->id, x.hamming = d->hamming, x.decision_margin = d->decision_margin;
+    const int order[4] = {3, 2, 1, 0};
+    for (size_t k = 0; k < 4; ++k) x.corners[k] = {d->p[order[k]][0], d->p[order[k]][1]};
+    out.push_back(x);
+  }
+  apriltag_detections_destroy(dets);
+  apriltag_detector_destroy(td);
+  return out;
 }
 
 }  // namespace gv::test

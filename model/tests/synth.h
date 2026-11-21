@@ -32,6 +32,7 @@ struct SceneParams {
   int noise = 6;            // +/- uniform noise amplitude
   bool blur = true;         // 3x3 box blur
   int extra_blur = 0;       // further 3x3 box-blur passes (motion/defocus stress)
+  double background_min = 60, background_max = 190;  // background brightness range
 };
 
 Scene make_scene(uint32_t seed, const SceneParams& params = {});

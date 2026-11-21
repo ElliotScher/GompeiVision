@@ -15,6 +15,7 @@
 #include "cscore_cv.h"
 #include "detector/FiducialDetector.h"
 #include "io/ConfigInterface.h"
+#include "io/DatasetRecorder.h"
 #include "io/FieldInterface.h"
 #include "util/QueuedFiducialData.h"
 #include "util/ThreadSafeQueue.h"
@@ -65,6 +66,10 @@ class Pipeline {
 
   // --- Detectors ---
   FiducialDetector m_AprilTagDetector;
+  static constexpr double kTagSizeM = 0.1651;
+
+  // Off unless GOMPEI_RECORD_DIR is set (see DatasetRecorder.h).
+  std::unique_ptr<DatasetRecorder> m_recorder;
 
   // --- Pipeline Data Flow ---
   ThreadSafeQueue<QueuedFrame> m_captured_frames;

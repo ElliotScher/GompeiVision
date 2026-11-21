@@ -80,6 +80,10 @@ Pipeline::Pipeline(const std::string& device_path,
               << std::endl;
   }
 
+  m_recorder = DatasetRecorder::fromEnvironment(
+      m_hardware_id, m_role, m_AprilTagDetector.settings(), kTagSizeM,
+      FieldInterface::getMap());
+
   std::cout << "[" << m_role
             << "] Initialized pipeline with ID: " << hardware_id << std::endl;
 }
@@ -283,23 +287,31 @@ void Pipeline::processing_loop() {
       m_AprilTagDetector.detect(frame, frame_observation);
       frame_observation.timestamp = frame.timestamp;
 
+      AprilTagResult result;
+      bool has_result = false;
       if (!frame_observation.tag_ids.empty() && m_intrinsics_loaded) {
-        AprilTagResult result;
         result.timestamp = frame_observation.timestamp;
         result.camera_role = m_role;
-        constexpr double tag_size_m = 0.1651;
 
         cv::Mat cameraMatrix = m_camera_matrix.clone();
         cv::Mat distCoeffs = m_dist_coeffs.clone();
 
         CameraPoseEstimator::estimatePose(frame_observation, result,
-                                          cameraMatrix, distCoeffs, tag_size_m,
+                                          cameraMatrix, distCoeffs, kTagSizeM,
                                           FieldInterface::getMap());
 
         TagAngleCalculator::calculate(frame_observation, result, cameraMatrix,
-                                      distCoeffs, tag_size_m);
+                                      distCoeffs, kTagSizeM);
 
         m_estimated_poses.push(result);
+        has_result = true;
+      }
+
+      if (m_recorder) {
+        m_recorder->record(frame, frame_observation,
+                           has_result ? &result : nullptr,
+                           m_intrinsics_loaded ? m_camera_matrix : cv::Mat(),
+                           m_dist_coeffs);
       }
 
       frame_count++;  // Increment processed frames

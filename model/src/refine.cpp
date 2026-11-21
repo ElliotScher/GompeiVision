@@ -61,6 +61,13 @@ std::optional<Pt> intersect(const Line& a, const Line& b) {
 std::optional<double> find_edge(const Image8& im, const Pt& at, const Pt& n, double w, bool check_direction) {
   constexpr double kStep = 0.5;
   const int half = static_cast<int>(std::ceil(w / kStep)) + 1;
+  // A search line that leaves the image gives no sample: clamped pixels would
+  // fake an edge along the frame border (a tag cut by the frame edge then
+  // gets dragged corners).
+  for (const int j : {-half, half}) {
+    const double x = at[0] + n[0] * j * kStep, y = at[1] + n[1] * j * kStep;
+    if (x < 0.5 || y < 0.5 || x > im.width - 0.5 || y > im.height - 0.5) return std::nullopt;
+  }
   std::vector<double> prof(static_cast<size_t>(2 * half + 1));
   for (int j = -half; j <= half; ++j)
     prof[static_cast<size_t>(j + half)] = sample(im, at[0] + n[0] * j * kStep, at[1] + n[1] * j * kStep);
@@ -148,7 +155,9 @@ std::optional<RefinedQuad> refine_quad(const Image8& im, const Quad& rough, cons
   Quad q = rough;
   std::optional<RefinedQuad> out;
   for (int pass = 0; pass < std::max(1, p.passes); ++pass) {
-    out = refine_once(im, q, p);
+    RefineParams pp = p;
+    if (pass == 0 && p.first_pass_window_max > 0) pp.window_max = p.first_pass_window_max;
+    out = refine_once(im, q, pp);
     if (!out) return std::nullopt;
     q.corners = out->corners;
   }

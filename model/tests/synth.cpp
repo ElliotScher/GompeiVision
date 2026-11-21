@@ -54,7 +54,7 @@ Scene make_scene(uint32_t seed, const SceneParams& p) {
 
   // Background: a lighting gradient plus a little texture.
   std::vector<double> img(static_cast<size_t>(p.width * p.height));
-  const double base = rng.uniform(60, 190), gx = rng.uniform(-0.15, 0.15), gy = rng.uniform(-0.15, 0.15);
+  const double base = rng.uniform(p.background_min, p.background_max), gx = rng.uniform(-0.15, 0.15), gy = rng.uniform(-0.15, 0.15);
   for (int y = 0; y < p.height; ++y)
     for (int x = 0; x < p.width; ++x)
       img[static_cast<size_t>(y * p.width + x)] =

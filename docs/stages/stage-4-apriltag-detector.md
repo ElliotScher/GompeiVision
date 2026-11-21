@@ -10,7 +10,7 @@ Each step is a separate RTL block with its own cocotb testbench against the Stag
 
 - [PL] decimation and adaptive threshold
 - [PL] streaming connected-components labeling with per-component feature accumulators (area, bounding box, K-direction extremes) and close detection
-- Quad finding as decided in Stage 1: 4A (boundary clustering by component pair, fit on the [RPU] first, then [PL] fit engines if the RPU can't keep up), or 4B ([PL] corner scorecard) with 4C ([PL] on-demand contour tracer) for the components 4B rejects
+- Quad finding: 4B, the [PL] corner scorecard (decided provisionally 2026-11-21; see [PLAN.md](../PLAN.md#apriltag-detector)). Components it rejects are dropped and counted. A fallback (4A, or the 4C tracer) is added only if recordings show it's worth its LUTs, which stay reserved
 - [PL] edge refinement and decode: quick decode before refinement, outlier-rejecting edge fits, closed-form homography and NAPA-style 9-bit block ID lookup, reading back from the on-chip strip buffer with DDR fallback
 - [RPU] NAPA-style shape repairs for the few tags that need them
 - Per-frame reset on the start-of-frame sideband, frame IDs on every result, and drop-and-count when a frame-store slot would be reused early
@@ -26,5 +26,5 @@ Each step is a separate RTL block with its own cocotb testbench against the Stag
 
 ## Risks
 
-- Boundary clustering and quad fitting are the riskiest pieces in the project (irregular memory access, variable work per frame). Keeping the RPU quad fit as a working fallback means the pipeline works end to end before the PL fit engines are done.
+- With 4B, the first RTL avoids the riskiest piece in the project (boundary clustering and quad fitting: irregular memory access, variable work per frame). If recordings call for 4A, its fit runs on the [RPU] first, so the pipeline works end to end before any PL fit engines exist.
 - Worst-case scenes (many tags, noisy backgrounds) can overflow cluster tables. Define and test overflow behavior: drop the smallest candidates, never stall.

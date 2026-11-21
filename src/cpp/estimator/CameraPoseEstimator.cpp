@@ -78,17 +78,18 @@ void CameraPoseEstimator::estimatePose(
     // A valid solution must have two poses and corresponding errors.
     if (rvecs.size() == 2 && tvecs.size() == 2 && errors.size() == 2) {
       CameraPoseObservation pose;
-      pose.tag_ids = observation.tag_ids;
+      pose.tag_ids = tags_used_ids;
       pose.error_0 = errors[0];
       pose.error_1 = errors[1];
 
-      frc::Pose3d field_to_tag_pose =
-          field_layout.find(observation.tag_ids[0])->second;
+      // The one tag that is in the field layout (not necessarily the first
+      // tag seen).
+      frc::Pose3d field_to_tag_pose = tagPoses[0];
 
       auto camera_to_tag_pose_0 =
-          PoseUtils::openCvPoseToWpilib(rvecs[0], tvecs[0]);
+          PoseUtils::openCvTagPoseToWpilib(rvecs[0], tvecs[0]);
       auto camera_to_tag_pose_1 =
-          PoseUtils::openCvPoseToWpilib(rvecs[1], tvecs[1]);
+          PoseUtils::openCvTagPoseToWpilib(rvecs[1], tvecs[1]);
 
       auto camera_to_tag_0 = frc::Transform3d(
           camera_to_tag_pose_0.Translation(), camera_to_tag_pose_0.Rotation());
@@ -119,7 +120,9 @@ void CameraPoseEstimator::estimatePose(
                         distCoeffs, multi_rvec, multi_tvec, false,
                         cv::SOLVEPNP_SQPNP, cv::noArray(), cv::noArray(),
                         errors);
- // The result of solvePnP is the pose of the field origin in the
+    if (multi_rvec.empty() || multi_tvec.empty() || errors.empty()) return;
+
+    // The result of solvePnP is the pose of the field origin in the
     // camera's frame.
     frc::Pose3d camera_to_field_pose =
         PoseUtils::openCvPoseToWpilib(multi_rvec[0], multi_tvec[0]);

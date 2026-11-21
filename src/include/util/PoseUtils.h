@@ -2,10 +2,12 @@
 
 #include <frc/geometry/Pose3d.h>
 #include <frc/geometry/Rotation3d.h>
+#include <frc/geometry/Transform3d.h>
 #include <frc/geometry/Translation3d.h>
 #include <units/angle.h>
 
 #include <cassert>
+#include <cmath>
 #include <opencv2/opencv.hpp>
 
 namespace PoseUtils {
@@ -47,6 +49,26 @@ inline frc::Pose3d openCvPoseToWpilib(const cv::Mat& rvec,
   const frc::Rotation3d frc_rotation(axis, units::radian_t(angle));
 
   return frc::Pose3d(frc_translation, frc_rotation);
+}
+
+/**
+ * @brief Converts a solvePnP tag pose (the tag in the camera frame, both in
+ * OpenCV conventions) to the tag's pose in the WPILib camera frame, with the
+ * tag in WPILib's tag convention.
+ *
+ * openCvPoseToWpilib converts only the camera's axes. A tag pose also has the
+ * tag's own axes, which differ: the IPPE object points use x right, y up,
+ * z toward the camera, while a WPILib tag has X out of its face, Y to the
+ * viewer's right and Z up (the corners CameraPoseEstimator uses: top-left at
+ * (0, -s/2, +s/2)). The two differ by 180 degrees about the tag's X axis,
+ * applied in the tag's own frame.
+ */
+inline frc::Pose3d openCvTagPoseToWpilib(const cv::Mat& rvec,
+                                         const cv::Mat& tvec) {
+  return openCvPoseToWpilib(rvec, tvec)
+      .TransformBy(frc::Transform3d{
+          frc::Translation3d{},
+          frc::Rotation3d{units::radian_t{M_PI}, 0_rad, 0_rad}});
 }
 
 inline cv::Point3f wpilibTranslationToOpenCV(

@@ -18,6 +18,8 @@
 //     for the Stage 1 comparison.)
 // Measured on synthetic scenes (test_refine): median corner error 0.03-0.15 px,
 // and no corner over 1 px in the full-resolution, small-tag and blur cases.
+// Samples whose search line leaves the image are dropped, so a tag cut by
+// the frame edge is fit from its visible edges.
 // Then fit a line to each edge's points with outlier rejection, so a short
 // obstruction doesn't drag a corner, and intersect neighboring lines.
 //
@@ -48,6 +50,10 @@ struct RefineParams {
   // when 4B ran at full resolution (the FPGA plan); use two when it ran on a
   // decimated image, whose rough corners can be beyond the window cap.
   int passes = 1;
+  // Window cap for the first pass only (0: window_max). Rough quads from an
+  // image decimated by f can be about f times further off, so the detector sets
+  // this to window_max * f; later passes start close and use window_max.
+  double first_pass_window_max = 0;
 };
 
 struct RefinedQuad {

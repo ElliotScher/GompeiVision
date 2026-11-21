@@ -21,6 +21,14 @@ option(GV_MODEL_TESTS "Build the golden-model tests" ON)
 
 include(FetchContent)
 
+# The JSON library the CPU pipeline uses, for reading recorded datasets.
+FetchContent_Declare(nlohmann_json
+  URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+  URL_HASH SHA256=42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa
+  SYSTEM
+  EXCLUDE_FROM_ALL)
+FetchContent_MakeAvailable(nlohmann_json)
+
 # Keep in sync with APRILTAG_VERSION in Dockerfile.X86 / Dockerfile.ARM.
 set(GV_APRILTAG_TAG v3.4.5)
 # Static, so the tests can call its internal threshold() and
@@ -45,10 +53,15 @@ add_library(gv_model
   src/components.cpp
   src/tag_lookup.cpp
   src/quad.cpp
-  src/refine.cpp)
+  src/refine.cpp
+  src/decode.cpp
+  src/detector.cpp
+  src/dataset.cpp
+  src/tracer.cpp
+  src/pnp.cpp)
 target_include_directories(gv_model PUBLIC include)
 # tag_lookup reads the tag36h11 code table and cell layout from AprilTag.
-target_link_libraries(gv_model PUBLIC apriltag)
+target_link_libraries(gv_model PUBLIC apriltag PRIVATE nlohmann_json::nlohmann_json)
 target_compile_options(gv_model PRIVATE ${GV_WARNINGS})
 
 add_executable(gv-model tools/gv_model.cpp)
@@ -73,7 +86,12 @@ if(GV_MODEL_TESTS)
     tests/test_synth.cpp
     tests/test_tag_lookup.cpp
     tests/test_quad.cpp
-    tests/test_refine.cpp)
+    tests/test_refine.cpp
+    tests/test_detector.cpp
+    tests/test_replay.cpp
+    tests/test_tracer.cpp
+    tests/test_pnp.cpp
+    tests/test_quad_options.cpp)
   target_link_libraries(gv_model_tests PRIVATE gv_model apriltag GTest::gtest_main)
   target_compile_options(gv_model_tests PRIVATE ${GV_WARNINGS})
   include(GoogleTest)

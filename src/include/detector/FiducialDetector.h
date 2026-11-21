@@ -36,6 +36,9 @@ class FiducialDetector {
   void detect(const QueuedFrame& frame,
               FiducialImageObservation& observation) const;
 
+  // The underlying AprilTag detector, read-only (for recording its settings).
+  const apriltag_detector_t* settings() const { return tagDetector; }
+
  private:
   apriltag_detector_t* tagDetector = nullptr;
   apriltag_family_t* tagFamily = nullptr;

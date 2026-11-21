@@ -2,7 +2,13 @@
 // intermediate, for comparing against RTL simulation dumps and for eyeballing.
 //
 //   gv-model dump INPUT.pgm OUTDIR [--decimate N] [--min-white-black-diff D]
+//   gv-model replay SESSION_DIR [--decimate N] [--csv OUT.csv]
 //
+// replay runs the golden detector over a recorded session (model/datasets/)
+// and diffs it against the CPU pipeline's detections; --decimate defaults to
+// the session's quad_decimate. Exits 1 if any frame disagrees.
+//
+// dump
 // Writes to OUTDIR:
 //   decimated.pgm               input after decimation (skipped when N = 1)
 //   tile_min.pgm, tile_max.pgm  raw 4x4 tile statistics (one pixel per tile)
@@ -19,6 +25,7 @@
 #include <string>
 
 #include "gv/model/components.h"
+#include "gv/model/dataset.h"
 #include "gv/model/decimate.h"
 #include "gv/model/quad.h"
 #include "gv/model/threshold.h"
@@ -29,8 +36,49 @@ using namespace gv::model;
 namespace {
 
 int usage() {
-  std::cerr << "usage: gv-model dump INPUT.pgm OUTDIR [--decimate N] [--min-white-black-diff D]\n";
+  std::cerr << "usage: gv-model dump INPUT.pgm OUTDIR [--decimate N] [--min-white-black-diff D]\n"
+               "       gv-model replay SESSION_DIR [--decimate N] [--csv OUT.csv]\n";
   return 2;
+}
+
+int replay_main(int argc, char** argv) {
+  const fs::path dir = argv[2];
+  int factor = 0;
+  std::string csv_path;
+  for (int i = 3; i < argc; ++i) {
+    const std::string a = argv[i];
+    if (a == "--decimate" && i + 1 < argc) factor = std::atoi(argv[++i]);
+    else if (a == "--csv" && i + 1 < argc) csv_path = argv[++i];
+    else return usage();
+  }
+  try {
+    const Dataset d = load_dataset(dir);
+    DetectorParams dp;
+    dp.decimate = factor > 0 ? factor : d.quad_decimate;
+    std::ofstream csv;
+    if (!csv_path.empty()) {
+      csv.open(csv_path);
+      csv << "file,timestamp,cpu_tags,golden_tags,matched,only_cpu,only_golden,worst_corner_diff_px\n";
+    }
+    int bad_frames = 0;
+    const ReplayStats st = replay(d, dp, 2.0, [&](const ReplayFrame& f) {
+      bad_frames += f.only_cpu + f.only_golden > 0;
+      if (csv.is_open())
+        csv << f.frame->file << ',' << f.frame->timestamp << ',' << f.frame->cpu.size() << ',' << f.golden.size() << ','
+            << f.matched << ',' << f.only_cpu << ',' << f.only_golden << ',' << f.worst_diff << '\n';
+    });
+    std::cout << dir.string() << " (" << d.hardware_id << " " << d.role << ", AprilTag " << d.apriltag_version
+              << ", decimate " << dp.decimate << ")\n"
+              << "  frames " << st.frames << ": CPU " << st.cpu_tags << " tags, golden " << st.golden_tags << "\n"
+              << "  matched " << st.matched << ", only CPU " << st.only_cpu << ", only golden " << st.only_golden
+              << ", frames that disagree " << bad_frames << "\n"
+              << "  corner difference on matched tags: median " << st.quantile(0.5) << " px, p95 "
+              << st.quantile(0.95) << " px, max " << st.quantile(1.0) << " px\n";
+    return bad_frames ? 1 : 0;
+  } catch (const std::exception& e) {
+    std::cerr << "gv-model: " << e.what() << "\n";
+    return 2;
+  }
 }
 
 Image8 tiles_to_image(const TileStats& s, bool want_max) {
@@ -42,6 +90,7 @@ Image8 tiles_to_image(const TileStats& s, bool want_max) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc >= 3 && std::string(argv[1]) == "replay") return replay_main(argc, argv);
   if (argc < 4 || std::string(argv[1]) != "dump") return usage();
   const fs::path input = argv[2], outdir = argv[3];
   int factor = 1;

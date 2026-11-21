@@ -71,6 +71,13 @@ tool_version() {
   extract_version "$("$@" 2>&1 | head -n 5 || true)"
 }
 
+# cmd_output CMD [ARGS...]: CMD's stdout, or nothing if CMD isn't installed
+# or fails. For tools whose version flag prints a bare version.
+cmd_output() {
+  have "$1" || return 0
+  "$@" 2>/dev/null || true
+}
+
 # py_version MODULE: the module's __version__, else its package metadata.
 py_version() {
   have python3 || return 0
@@ -86,7 +93,7 @@ SECTION=common
 check_min git 2.34 "$(tool_version git --version)"
 check_min python3 "$PYTHON_MIN" "$(tool_version python3 --version)"
 check_min make 4.0 "$(tool_version make --version)"
-check_min "g++ (host)" 13 "$(have g++ && g++ -dumpfullversion 2>/dev/null || true)"
+check_min "g++ (host)" 13 "$(cmd_output g++ -dumpfullversion)"
 
 # --- Hardware track ---------------------------------------------------------
 if want_track hardware; then
@@ -105,24 +112,24 @@ if want_track hardware; then
   # WSLg, or in CI), so only check that it's installed.
   if have gtkwave; then row gtkwave "any" "installed" OK; else row gtkwave "any" "-" WARN "optional waveform viewer"; fi
   check_exact vivado "$AMD_TOOLS_VERSION" \
-    "$(have vivado && extract_version "$(vivado -version 2>/dev/null | head -n 1 || true)" || true)" \
+    "$(extract_version "$(cmd_output vivado -version | head -n 1)")" \
     optional "optional: bitstreams build on the shared build machine"
 fi
 
 # --- RPU track --------------------------------------------------------------
 if want_track rpu; then
   SECTION=rpu
-  check_min arm-none-eabi-gcc "$ARM_NONE_EABI_GCC_MIN" "$(have arm-none-eabi-gcc && arm-none-eabi-gcc -dumpfullversion || true)"
+  check_min arm-none-eabi-gcc "$ARM_NONE_EABI_GCC_MIN" "$(cmd_output arm-none-eabi-gcc -dumpfullversion)"
   check_min cmake "$CMAKE_MIN" "$(tool_version cmake --version)"
   check_exact vitis "$AMD_TOOLS_VERSION" \
-    "$(have vitis && extract_version "$(vitis -v 2>/dev/null | head -n 5 || true)" || true)" \
+    "$(extract_version "$(cmd_output vitis -v | head -n 5)")" \
     optional "optional until the RPU firmware needs the AMD BSP (Stage 2)"
 fi
 
 # --- APU track --------------------------------------------------------------
 if want_track apu; then
   SECTION=apu
-  check_min aarch64-linux-gnu-g++ "$AARCH64_GCC_MIN" "$(have aarch64-linux-gnu-g++ && aarch64-linux-gnu-g++ -dumpfullversion || true)"
+  check_min aarch64-linux-gnu-g++ "$AARCH64_GCC_MIN" "$(cmd_output aarch64-linux-gnu-g++ -dumpfullversion)"
   check_min cmake "$CMAKE_MIN" "$(tool_version cmake --version)"
   check_min ninja "$NINJA_MIN" "$(tool_version ninja --version)"
   check_min "docker (legacy pipeline)" "$DOCKER_MIN" "$(tool_version docker --version)" optional \

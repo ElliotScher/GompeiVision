@@ -65,7 +65,7 @@ digraph GompeiVisionStructureDiagram {
             VideoRecording;
 
             FrameBus -> VideoRecording [
-                label="VCU encode to M.2 SSD"
+                label="VCU encode to eMMC"
             ];
         }
     }

@@ -1,0 +1,84 @@
+# Project CI (Stage 0b), on every push and PR:
+# - hardware: Verible lint and format check, then the Verilator + cocotb sims
+#   (scripts/lint-rtl.sh, scripts/run-sims.sh), with the toolchain installed by
+#   bootstrap.sh and cached between runs.
+# - model, apu: CMake build and ctest, once each folder has a CMakeLists.txt.
+# - robot: Gradle tests, once robot/ has a Gradle build.
+# Jobs for folders that are still README stubs pass with a note, so this
+# workflow is green from day one and starts checking code as soon as it lands.
+# Bitstreams build on the shared build machine, not here.
+name: ci
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  hardware:
+    name: RTL lint and simulation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Verilator builds from source (several minutes), so keep ~/.local and
+      # .venv until the pins or the bootstrap script change.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.local
+            .venv
+          key: hw-${{ runner.os }}-${{ hashFiles('tools/versions.env', 'scripts/bootstrap.sh') }}
+      - name: Install the hardware track
+        run: bash scripts/bootstrap.sh --yes --hardware
+      - name: Verible lint and format check
+        run: bash scripts/lint-rtl.sh
+      - name: Verilator + cocotb sims
+        run: bash scripts/run-sims.sh
+
+  cmake:
+    name: ${{ matrix.dir }}/ unit tests
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [model, apu]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Skip while ${{ matrix.dir }}/ has no CMakeLists.txt
+        if: hashFiles(format('{0}/CMakeLists.txt', matrix.dir)) == ''
+        run: echo "::notice::${{ matrix.dir }}/ has no CMakeLists.txt yet; nothing to build"
+      - name: Build and test
+        if: hashFiles(format('{0}/CMakeLists.txt', matrix.dir)) != ''
+        run: |
+          cmake -S ${{ matrix.dir }} -B build/${{ matrix.dir }} -DCMAKE_BUILD_TYPE=Release
+          cmake --build build/${{ matrix.dir }} --parallel
+          ctest --test-dir build/${{ matrix.dir }} --output-on-failure
+
+  robot:
+    name: robot/ unit tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Skip while robot/ has no Gradle build
+        if: hashFiles('robot/build.gradle', 'robot/build.gradle.kts') == ''
+        run: echo "::notice::robot/ has no Gradle build yet; nothing to test"
+      - name: Read the JDK pin
+        if: hashFiles('robot/build.gradle', 'robot/build.gradle.kts') != ''
+        id: pins
+        run: grep '^JDK_VERSION=' tools/versions.env | sed 's/^JDK_VERSION=/jdk=/' >>"$GITHUB_OUTPUT"
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        if: hashFiles('robot/build.gradle', 'robot/build.gradle.kts') != ''
+        with:
+          distribution: temurin
+          java-version: ${{ steps.pins.outputs.jdk }}
+      - name: Gradle tests
+        if: hashFiles('robot/build.gradle', 'robot/build.gradle.kts') != ''
+        working-directory: robot
+        run: ./gradlew test --no-daemon

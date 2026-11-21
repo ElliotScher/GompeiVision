@@ -21,6 +21,11 @@ jobs:
   build-amd64:
     name: Build and Package (amd64)
     runs-on: ubuntu-latest
+    # Pushes the builder image and its cache to GHCR. The repo's default token
+    # is read-only, so ask for package writes explicitly.
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -92,6 +97,9 @@ jobs:
   build-arm64:
     name: Build and Package (arm64)
     runs-on: ubuntu-22.04-arm
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4

@@ -26,13 +26,13 @@ Every latency, resource, timing and cost figure here is an **estimate**. Figures
 
 **Goals**
 
-- One product: a self-contained, Limelight-sized **single-lens module** (K26 SOM, one global-shutter camera, SSD and a machined housing, a few inches on each side), **as cheap as we can make it**. Target: roughly $400–580 per module (see [Module cost](#module-cost)). A robot carries as many modules as it needs.
+- One product: a self-contained, Limelight-sized **single-lens module** (K26 SOM, one global-shutter camera on the carrier board, and a machined housing, a few inches on each side), **as cheap as we can make it**. Target: roughly $400–580 per module; currently estimated at ~$470–580 (see [Module cost](#module-cost)). A robot carries as many modules as it needs.
 - Every module does streaming AprilTag detection and **built-in object detection** (the DPU in the FPGA logic), records its own video, and implements the macro architecture in [`GompeiVisionStructureDiagram.dot`](../GompeiVisionStructureDiagram.dot).
 - Exposure-to-measurement latency on the tag path that is low **and** nearly constant, with hardware exposure timestamps.
 - **Tag corners go to the robot over CAN-FD, and PnP runs on the SystemCore** (see [Robot-side PnP](#robot-side-pnp)). One solve can use every module's corners, the live gyro, and the tag map and camera positions that robot code already owns.
 - Drop-in compatibility with the CPU pipeline: the module also solves PnP itself and publishes the same NetworkTables topics, for dashboards, debugging, roboRIO robots and teams not using our robot library.
 - 1280×800 at ≥100 FPS for AprilTags (to be confirmed in Stage 0b against the chosen sensor).
-- Every module records to its own SSD, with per-frame timestamps that line up with robot logs.
+- Every module records match video to its own on-module eMMC, with per-frame timestamps that line up with robot logs.
 - Fast recovery after a brownout or power cut: the tag path is producing corners again within a few seconds, without waiting for Linux to boot.
 
 **Non-goals**
@@ -62,7 +62,7 @@ Legend: **[PL]** FPGA logic, **[RPU]** real-time Cortex-R5F cores, **[APU]** Cor
 | TagSLAM | Desktop tool (optionally [APU] later): offline factor graph over logged corners from all modules plus robot odometry, used as field calibration | Moderate | Feasible; small problem (one field's tags), no real-time budget. See [TagSLAM](#tagslam-offline-field-calibration) |
 | PoseMeasurements, ObjectData, MapData | CAN-FD corner frames from the [RPU] (primary tag path); [APU] WPILib `ntcore` in a real-time thread for module-side poses, objects, status and everything else | Easy–moderate | Feasible. Risk: Linux publish jitter on the NT path (measured in Stage 5) |
 | MapStorage | [APU] refined tag map in files on eMMC | Easy | Feasible |
-| Video recording (not in the diagram) | VCU hardware encoder (H.264/H.265) reading the DDR frame store; [APU] GStreamer writes segmented files to the module's M.2 SSD | Easy–moderate | Feasible. One lens at 120 FPS uses about a quarter of the VCU's ~4K60 capacity. See [Video recording](#video-recording-vcu--apu) |
+| Video recording (not in the diagram) | VCU hardware encoder (H.264/H.265) reading the DDR frame store; [APU] GStreamer writes segmented files to a data partition on the SOM's eMMC | Easy–moderate | Feasible. One lens at 120 FPS uses about a quarter of the VCU's ~4K60 capacity. See [Video recording](#video-recording-vcu--apu) |
 | Setup-mode stream (from CPU version) | [APU] MJPEG from the frame store, or H.264 from the VCU | Easy | Feasible |
 
 **Overall:** feasible. The only large custom hardware block is the AprilTag detector. Everything else is ported or existing software, or prebuilt IP.
@@ -87,7 +87,7 @@ Rules:
 
 ### Multiple modules
 
-Each module is independent: its own SoC, camera, SSD, Ethernet and CAN-FD connections. Nothing on one module depends on another.
+Each module is independent: its own SoC, camera, storage, Ethernet and CAN-FD connections. Nothing on one module depends on another.
 
 - **Per module:** capture, tag detection, corner output, module-side PnP for NT, object detection, recording.
 - **Fusion happens on the robot.** Robot code gets every module's corners in the same loop. It can solve each camera frame separately and fuse the results in the pose estimator, or run one joint solve across modules (see [Robot-side PnP](#robot-side-pnp)).
@@ -152,7 +152,7 @@ Stage 1 builds an **LED glass-to-robot rig** (an LED the robot toggles, seen by 
 | One camera, 1280×800, 8-bit (mono, or raw Bayer for color), 120 FPS | ≈123 MB/s |
 | Downscaled stream for object detection, e.g. 320×320 RGB at 30–60 FPS | ≈9–18 MB/s |
 | VCU encoding one stream (frame reads plus reference frames) | roughly 0.25–0.5 GB/s (estimate) |
-| Encoded video to the SSD, match mode | ≈0.75–1.5 MB/s (6–12 Mbps) |
+| Encoded video to eMMC, match mode | ≈0.75–1.5 MB/s (6–12 Mbps) |
 | DDR frame store writes + DPU weights/activations + Linux | a few GB/s at most |
 
 Zynq UltraScale+ modules use a wide DDR4 interface shared by PL, RPU and APU. Bandwidth is not expected to be the limit, but the DPU and the VCU compete with the frame store, so Stages 3 and 7 measure memory contention and check that the tag path is unaffected. On-chip RAM (block RAM / UltraRAM) for line buffers, tile statistics, label tables and the DPU is the tighter budget; Stage 0b estimates it per block.
@@ -170,7 +170,7 @@ Zynq UltraScale+ modules use a wide DDR4 interface shared by PL, RPU and APU. Ba
 5. An off-the-shelf module and dev kit available now, so we can prototype before designing our own board.
 6. Covered by the free tier of the vendor toolchain.
 7. Cost within FRC per-item limits, and the module as a whole near the [cost target](#module-cost).
-8. A hardware video encoder (an "EV" Zynq UltraScale+ part; EG parts have none) and PCIe for an M.2 SSD.
+8. A hardware video encoder (an "EV" Zynq UltraScale+ part; EG parts have none) and enough on-module storage for match recordings.
 9. Small enough for a Limelight-sized module, with heat the housing can remove.
 
 ### Candidates
@@ -206,7 +206,7 @@ Rough estimates, to be replaced by synthesis results in Stage 0b. The K26 has ro
 
 ### Sensors
 
-The same carrier takes either camera board, chosen per module (pin compatibility checked in Stage 0b):
+The sensor sits directly on the carrier board, and either sensor is populated at assembly (footprint compatibility checked in Stage 9):
 
 | Sensor | Resolution and rate | Use |
 |---|---|---|
@@ -214,35 +214,35 @@ The same carrier takes either camera board, chosen per module (pin compatibility
 | **OV9782** (color sibling of the OV9281) | 1280×800 at 120 FPS | Better object detection; tags run on the debayered luma, with slightly lower corner accuracy (measured in Stage 4) |
 | **AR0234** (mono or color, upgrade) | 1920×1200 at 120 FPS | More range and field of view; more pixel throughput, more DPU input scaling and higher cost |
 
-- **Camera boards:** our own small boards (sensor, regulators, oscillator, connector) for the cheapest build, or off-the-shelf boards for prototypes.
+- **Camera on the carrier:** the sensor, its regulators, oscillator and M12 lens holder are on the front of the carrier board, with the SOM plugged into the back. There is no separate camera board, flex cable or camera connector. Off-the-shelf camera boards are used only for dev-kit prototypes.
 - **Lenses:** standard M12 lenses. Stage 0b tests a few focal lengths and keeps a tested list: narrower for tag range, wider for object detection near the robot.
 - **Why MIPI, not USB:** a USB (UVC) camera hands complete frames to Linux, and many have a bridge chip that buffers internally, so the PL can't start until the frame is done. MIPI CSI-2 sends uncompressed RAW8/RAW10 rows straight into the PL, one packet per row, with frame start/end markers. Leave the sensor's optional DPCM compression off.
-- **Cable length:** MIPI flex cables are fragile and limited to roughly tens of centimeters. Inside a module the camera board sits a few centimeters from the carrier on a short, enclosed cable, so this mostly matters for dev-kit prototypes.
+- **Cable length:** MIPI flex cables are fragile and limited to roughly tens of centimeters. With the sensor on the carrier there is no cable in the module, so this only matters for dev-kit prototypes.
 
 ### Module form factor
 
-About the size of a Limelight or smaller: roughly 3.5 × 2.5 × 1.5 in (estimate, set in Stage 9).
+About the size of a Limelight: roughly 3.5 × 2.8 × 1.5 in (estimate, set in Stage 9). The K26 is 77 × 60 mm, so 2.8 in (71 mm) is about the narrowest that leaves room for milled walls.
 
-- **Stack, front to back:** camera board centered on the front plate → short MIPI flex → carrier board (M.2 2230 SSD underneath) → K26 SOM → housing back plate as heatsink.
+- **Stack, front to back:** front plate with the lens opening → carrier board (sensor and M12 lens holder on its front face) → K26 SOM → housing back plate as heatsink.
 - **Back panel:** power, Ethernet, CAN-FD, and trigger in/out on one locking connector.
 - **No IMU required.** Heading comes from the robot's gyro. The carrier can leave an unpopulated footprint for one.
-- **Heat:** estimated draw is K26 under load ~6–10 W, camera ~0.3 W, SSD writing ~1–2 W, so ~8–12 W. The aluminum housing is the heatsink, the SoC is thermally bonded to it, and a small filtered fan is added only if Stage 9 measures it's needed. Chip temperature goes on the status topic.
+- **Heat:** estimated draw is K26 under load ~6–10 W, camera ~0.3 W, carrier ~0.5–1 W, so ~7–11 W. The aluminum housing is the heatsink, the SoC is thermally bonded to it, and a small filtered fan is added only if Stage 9 measures it's needed. Chip temperature goes on the status topic.
 - **Housing:** machined in-house on a 3-axis mill from aluminum plate: a pocketed shell and a back plate, with mounting holes matching common camera mounts.
-- **Power:** 12 V through a buck-boost regulator, or PoE over the Ethernet cable for a single cable (check the FRC power rules).
+- **Power:** 12 V through a discrete buck-boost regulator on the carrier. No PoE.
 
 ### Module cost
 
-Estimates for a small batch, checked against real quotes in Stage 0b:
+Small-batch estimates. The SOM and connector prices come from the [Stage 0b cost check](stages/stage-0b-hardware-and-scaffolding.md#cost-check-list-prices-2026-11-20) (list prices, 2026-11-20); the other lines still need quotes.
 
 | Part | Estimate |
 |---|---|
-| K26 SOM (commercial grade) | ~$250–330 |
-| Camera board + M12 lens | ~$25–60 |
-| Carrier board (PCB + assembly, small batch) | ~$60–100 |
-| M.2 2230 NVMe SSD | ~$25–40 |
+| K26C SOM (SM-K26-XCL2GC, commercial grade, production version with 16 GB eMMC) | ~$377–406 |
+| Camera sensor on the carrier + M12 lens and holder | ~$20–30 |
+| Carrier board (PCB + assembly, small batch; no M.2) | ~$45–70 |
+| SOM mating connectors (2 × Samtec ADM6-60; free samples if available) | ~$0–50 |
 | Housing (aluminum stock, machined in-house) and hardware | ~$15–25 |
-| Connectors, cables, CAN-FD transceiver, regulator | ~$25 |
-| **Per module** | **~$400–580** |
+| Connectors, CAN-FD controller and transceiver, discrete buck-boost regulator | ~$15–25 |
+| **Per module** | **~$470–580** |
 
 Dev kits, spares and the first board revision's setup costs are on top. For comparison, COTS cameras with object detection cost about $600 each.
 
@@ -321,7 +321,7 @@ Each block is tested bit for bit against a C++ model of the same block. The whol
    - **4A. Boundary clustering + quad fit** (closest to the reference library). Pixels on black/white edges are grouped by their (black component, white component) pair. When both components close, the cluster goes to a fit engine: sort by angle, line-fit error from prefix sums, corner search. The first implementation runs the fit on the RPU; the hot loop moves to PL fit engines if the RPU can't keep up. This is the irregular part; hashing and memory layout decide feasibility.
    - **4B. Corner scorecard** (cheaper, fully streaming). For each black component, the accumulator tracks the pixel farthest along each of K = 16 directions (the max of x·cosθ + y·sinθ). Each corner of a convex quad is the extreme point for a range of directions equal to 180° minus its interior angle, so K = 16 catches corners up to about 157°. When the component closes, merge near-duplicate extremes and keep the 4 that enclose the largest area. No edge points are stored or sorted. It relies on the tag's white quiet zone (true for 36h11). Components that fail its sanity checks (blob much larger than its quad, implausible shape, too many separate extremes), which usually means a tag merged with dark background or partly hidden, go to 4C.
    - **4C. On-demand contour tracer** (ArUco-style, only for 4B rejects). A small PL block walks the rejected blob's outline in the on-chip strip buffer (or DDR, for blobs taller than the buffer), then runs the same angle sort, line fit and corner search as 4A. Estimate 10–50 µs per tag, with only one blob's points in memory at a time and roughly 8–15k LUTs. Capped at a few candidates per frame; extras are dropped and counted.
-5. **Edge refinement:** only candidates that pass a quick decode on the rough quad are refined (NAPA's order), so text and texture are rejected before the expensive step. Sample across each of the 4 edges about every 1.5 px, find the edge (gradient centre for sharp edges, midpoint crossing for blurred ones), drop outlier samples so a short obstruction doesn't drag a corner, least-squares fit each edge and intersect. This produces the subpixel corners for 4B and 4C, and improves 4A.
+5. **Edge refinement:** only candidates that pass a quick decode on the rough quad are refined (NAPA's order), so text and texture are rejected before the expensive step. Sample across each of the 4 edges about every 1.5 px, find the edge (gradient centre for sharp edges, midpoint crossing for blurred ones), drop outlier samples so a short obstruction doesn't drag a corner, least-squares fit each edge and intersect. This produces the subpixel corners for 4B and 4C, and improves 4A. **Search window (decided 2026-11-20):** each sample searches ±W px along the edge normal, with W = clamp(0.5 × cell + 1, 2, 6) px (cell = side / 8), and accepts only an edge that goes dark to bright moving outward. That direction check rules out the border's inner edge and the quiet zone's outer edge, so the nearest wrong edge it could accept is about 2 cells away. The window scales because small tags have wrong edges close by and big tags have the roughest corners; the cap bounds worst-case latency. One pass is enough when 4B runs at full resolution. The Stage 1 comparison against fixed ±2 and ±5 windows, with and without the direction check, is in the [Stage 1 doc](stages/stage-1-baseline-and-golden-models.md#progress-2026-11-20).
 6. **Decode:** closed-form square-to-quad homography (Heckbert's projective mapping: a few dozen multiplies and two divides, no linear solve). Sample the border and data cells, fit the black/white brightness model from the border, and threshold each bit. Look up the ID NAPA's way: any code within 3 bit errors shares one of the payload's four 9-bit blocks exactly, so four lookups in 512-entry block-RAM tables narrow the 2,348 code/rotation candidates to a handful, which are then checked exactly. That takes a few clock cycles. A third bit error is allowed only when the wrong cells touch (glare, a finger), so random patterns don't match by chance.
 7. **Pixel read-back:** by the time a tag closes, its top rows have left the line buffers. Refinement and decode read from the on-chip strip buffer (see [Bandwidth and memory budget](#bandwidth-and-memory-budget)), falling back to the DDR frame store. Reads are small and local (bit sampling grid plus edge strips), so this costs microseconds.
 8. **Frame boundaries:** every block resets its per-frame state (labels, accumulators, tile statistics) when the start-of-frame sideband reaches it, so blocks can be working on different frames at the same time. Every result carries the frame ID. A frame-store slot isn't reused until all of its tags are decoded; if it would be, the remaining candidates are dropped and counted, never stalled.
@@ -401,15 +401,15 @@ SystemCore has CAN-FD buses; the roboRIO's CAN is classic CAN 2.0 (8-byte frames
 
 - The VCU (the Zynq's hard H.264/H.265 encoder) reads the camera stream from the DDR frame store. Its total capacity is about 4K at 60 FPS (≈500 Mpx/s); one 1280×800 stream at 120 FPS is ≈123 Mpx/s, about a quarter, leaving room for the setup stream. Recording at 30–60 FPS is enough for match replays.
 - Mono sensors: encode as monochrome (4:0:0) if the VCU and our tool version support it; otherwise fill the chroma planes with a constant in PL. Color sensors encode as normal 4:2:0.
-- [APU] GStreamer with AMD's VCU plugins writes **segmented** files (a few seconds each, fragmented MP4 or MKV) to an ext4 or f2fs data partition on the M.2 SSD, separate from the read-only root. A power cut loses at most the last segment.
+- [APU] GStreamer with AMD's VCU plugins writes **segmented** files (a few seconds each, fragmented MP4 or MKV) to an f2fs data partition on the SOM's 16 GB eMMC, separate from the read-only root. A power cut loses at most the last segment. At ≈0.1–0.25 GB per match the partition holds dozens of matches; recordings are copied off over Ethernet between events, and the oldest are deleted when it fills.
 - A **metadata file** per recording: frame ID, hardware exposure timestamp, detections, corners and poses for each frame, and a sync point to the robot's AdvantageKit/WPILOG log. TagSLAM and the datasets use it.
-- Two modes: **match** (H.265, 30–60 FPS, ≈6–12 Mbps per module, ≈0.1–0.25 GB per match) and **dataset** (raw frames, ≈123 MB/s per module, for golden-model datasets and object-detection training; practice sessions only, since compression changes pixel values).
+- Two modes: **match** (H.265, 30–60 FPS, ≈6–12 Mbps per module, ≈0.1–0.25 GB per match) and **dataset** (raw frames for golden-model datasets and object-detection training; practice sessions only, since compression changes pixel values). Raw frames are ≈123 MB/s at 120 FPS, more than the eMMC can store or sustain, so dataset mode streams frames over Ethernet to a laptop (up to ≈60 FPS at full resolution) or records short bursts to eMMC. Full-rate datasets come from the dev kit with a USB 3.0 SSD.
 - Started and stopped from robot code over NT (for example, start at match start).
 - Recording never touches the tag path; Stage 3's contention test confirms it.
 
 ### Storage (APU)
 
-- Files on eMMC: board ID, cached config and camera calibration, DPU model, the saved tag map. No SD card on the robot (they work loose and corrupt on power cuts); the root filesystem is read-only. Video and dataset recordings go to the M.2 SSD.
+- Files on eMMC: board ID, cached config and camera calibration, DPU model, the saved tag map. No SD card on the robot (they work loose and corrupt on power cuts); the root filesystem is read-only. Match recordings go to a separate data partition on the same eMMC.
 
 ## Interfaces and message formats
 
@@ -500,13 +500,13 @@ Each layer must pass before the next is trusted:
 | FRC rule changes (power, cost, custom electronics) | Low | High | Check the game manual every season |
 | Electrical noise and brownouts on the robot | Medium | High | Buck-boost regulator that holds the input steady through ~7 V sags, brownout-tolerant boot, watchdog, read-only root filesystem, eMMC boot (no SD card), status topic |
 | Module reboots mid-match (hit or brownout) and is blind while Linux boots | Medium | High | Tag path and CAN-FD boot from the first-stage loader without Linux; recovery time measured in Stage 9 |
-| MIPI flex cable cracks or works loose on the robot | Medium | High | Locked mounting and strain relief, short enclosed run, spares |
+| Lens focus or sensor alignment shifts with vibration | Medium | Medium | Lens holder screwed to the carrier and the front plate, thread-locked lens, focus checked in the pit routine |
 | Corner scorecard (4B) misses tags that touch dark background or are occluded | Medium | Low | Measured in Stage 1; on-demand contour tracer (4C); or use 4A |
 | FPGA detector bug or bad bitstream at an event | Low | High | NAPA fallback by config switch; 1-in-N cross-check catches silent errors |
 | Gyro offset corrected by its own constrained-solve output (feedback loop) | Low | Medium | Only unconstrained, quality-gated multi-tag headings may correct the offset |
 | Module overheats in a Limelight-sized housing (~8–12 W) | Low | High | Housing as heatsink, optional fan, temperature on the status topic, thermal test in Stage 9; lower DPU rate or recording FPS when hot |
-| Costs creep above the target | Medium | Medium | Quotes in Stage 0b; cost table kept current; cheapest camera board and in-house housing |
-| SSD corruption on power cuts | Medium | Low | Segmented recording, separate data partition, journaling filesystem |
+| Costs creep above the target | Medium | Medium | Quotes in Stage 0b; cost table kept current; sensor on the carrier, no SSD, in-house housing |
+| Recording partition corruption on power cuts, or eMMC wear | Medium | Low | Segmented recording, separate f2fs data partition, read-only root; writes are small (≈0.1–0.25 GB per match), and eMMC health is on the status topic |
 
 ## FRC rules checklist
 
@@ -515,8 +515,8 @@ Check each item against the current season's game manual; rule numbers change ev
 - [ ] Custom circuits and coprocessors are allowed and connect to the control system only through allowed interfaces (Ethernet through the robot radio/switch, and CAN).
 - [ ] Custom CAN devices are allowed, use the "Team Use" manufacturer and "Miscellaneous" device type IDs, and bus wiring and termination follow the rules.
 - [ ] Frame grounding and ESD requirements are met for the module and its enclosure.
-- [ ] Powered from the PDH/PDP on an appropriately rated breaker or fuse (if using PoE, the injector and wiring are allowed).
-- [ ] Each module's cost (SOM, carrier board, camera, SSD, housing) within the per-item cost limit, and every module counted in the cost accounting.
+- [ ] Powered from the PDH/PDP on an appropriately rated breaker or fuse.
+- [ ] Each module's cost (SOM, carrier board with camera, housing) within the per-item cost limit, and every module counted in the cost accounting.
 - [ ] No wireless radios active on the board (disable any Wi-Fi/Bluetooth on dev kits).
 - [ ] Any illumination LEDs follow the lighting rules.
 - [ ] Mounting and enclosure meet the robot construction rules.

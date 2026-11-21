@@ -96,7 +96,7 @@ RUN make install
 
 # --- Build and Install AprilTag ---
 WORKDIR /opt
-ARG APRILTAG_VERSION="v3.3.0"
+ARG APRILTAG_VERSION="v3.4.5"
 RUN git clone --depth 1 --branch ${APRILTAG_VERSION} https://github.com/AprilRobotics/apriltag.git
 
 RUN mkdir /opt/apriltag/build

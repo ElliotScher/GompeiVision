@@ -2,7 +2,7 @@
 
 ## Goal
 
-Frames from the module's MIPI global-shutter sensor (OV9281 mono or OV9782 color) stream through the FrameBus with hardware exposure timestamps, are visible from Linux, can be viewed in setup mode, and are recorded to the module's SSD.
+Frames from the module's MIPI global-shutter sensor (OV9281 mono or OV9782 color) stream through the FrameBus with hardware exposure timestamps, are visible from Linux, can be viewed in setup mode, and are recorded (to the SD card on the dev kit, to eMMC on our carrier).
 
 ## Deliverables
 
@@ -16,7 +16,7 @@ Frames from the module's MIPI global-shutter sensor (OV9281 mono or OV9782 color
 - [PL] debayer for the color sensor: a luma stream for the tag pipeline and RGB for the downscaler.
 - Camera calibration: ChArUco boards with OpenCV ArUco, run in setup mode on the module or on a laptop from recorded frames. Results go into the robot's config (`camera_matrix`, `distortion_coefficients`) and are cached on the module for boot.
 - [APU] NAPA on the frame store as the module's first working tag path, publishing module-side poses over NT (and corners over CAN-FD once Stage 5 adds them), the same paths the FPGA detector will use.
-- [APU] video recording (see [PLAN.md](../PLAN.md#video-recording-vcu--apu)): VCU encode, segmented files on the M.2 SSD, a per-frame metadata file, start/stop over NT, and match and raw dataset modes.
+- [APU] video recording (see [PLAN.md](../PLAN.md#video-recording-vcu--apu)): VCU encode, segmented files on the eMMC data partition, a per-frame metadata file, start/stop over NT, match mode, and raw dataset mode (streamed over Ethernet, or a USB SSD on the dev kit).
 - Sensor windowing (ROI) and lane-rate settings exposed in config, so readout time can be traded for field of view.
 
 ## Exit criteria

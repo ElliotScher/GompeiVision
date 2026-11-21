@@ -11,7 +11,7 @@ COTS vision units like Limelight, and our own CPU version of GompeiVision, follo
 
 GompeiVision runs on an **SoC FPGA**: one chip with FPGA logic, real-time cores and a Linux-capable ARM CPU sharing the same memory. The latency-critical work (camera capture, AprilTag detection, corner output) runs in **hardware and on real-time cores**. Pixels are processed as they come off the sensor, so a tag's corners are found a millisecond or two after the last row of the tag is read out, and go straight to the robot over **CAN-FD**. The robot controller (SystemCore) solves the pose, where it already has the gyro, the tag map and every camera's mounting position. The heavier, irregular work (object detection, networking, recording) runs on the module's **ARM CPU under Linux**, where we can use normal C++, WPILib's `ntcore` and existing libraries. The module also publishes the same NetworkTables topics we use today.
 
-The system is built from **single-lens modules**, one product made as cheaply as we can. Each module is a self-contained, Limelight-sized unit (a few inches on each side) with one global-shutter camera, a Kria K26 SoC FPGA, built-in object detection and its own SSD, in a housing we machine ourselves, for roughly $400–580. A robot carries as many modules as it needs, and the robot fuses all of their tag corners.
+The system is built from **single-lens modules**, one product made as cheaply as we can. Each module is a self-contained, Limelight-sized unit (a few inches on each side) with one global-shutter camera, a Kria K26 SoC FPGA, built-in object detection and on-module video recording, in a housing we machine ourselves, for roughly $470–580. A robot carries as many modules as it needs, and the robot fuses all of their tag corners.
 
 What we expect to gain, in order of importance:
 
@@ -33,7 +33,7 @@ What we expect to gain, in order of importance:
 | Object detection | Prebuilt accelerator in FPGA logic, run from Linux | AMD's neural-network accelerator (Vitis AI DPU), built into every module. No custom accelerator to build |
 | Object localization | ARM CPU (Linux) | Ground-plane projection |
 | NetworkTables, config, setup stream | ARM CPU (Linux) | Uses WPILib's real `ntcore` library |
-| Video recording | Hardware video encoder + M.2 SSD | H.265, written to each module's own SSD |
+| Video recording | Hardware video encoder + on-module eMMC | H.265, written to each module's own eMMC |
 | TagSLAM | Desktop, from logs | Offline field calibration: refines the tag map from every module's logged corners |
 
 The real risks are not technical limits. They are **people and time**: HDL skills are rare on student teams, the AprilTag hardware takes several months to a season, and debugging hardware is slower than debugging C++. The full analysis, latency budget and risk register are in [docs/PLAN.md](docs/PLAN.md).
@@ -82,7 +82,7 @@ This maps the macro design in [`GompeiVisionStructureDiagram.dot`](GompeiVisionS
 │        │                         [RPU] module-side PnP (same detections) ───┐         │        │
 │        └─► [PL] downscaler → DPU ◄─ [APU] object detection + localization ──┤         │        │
 │                                                                             ▼         │        │
-│ [APU] Linux: ntcore · config · field layout · M.2 recording (VCU) · setup stream      │        │
+│ [APU] Linux: ntcore · config · field layout · eMMC recording (VCU) · setup stream     │        │
 └─────────────────────────────────────────────────────────────────────────────┬─────────┬────────┘
                                                                               │         │
                                              GbE (NT: poses, objects, status) │         │ CAN-FD (tag corners)
@@ -105,7 +105,7 @@ This diagram is one module. A robot carries several, all on one dedicated CAN-FD
 - `robot/`: the robot library (Java, optional C++ core over JNI): CAN-FD reader, PnP, heading-constrained and multi-module solves.
 - `ml/`: object-detection datasets, training and quantization scripts.
 - `tools/tagslam/`: the offline TagSLAM field-calibration tool.
-- `hardware/`: custom carrier and camera boards (KiCad) and the machined enclosure (FreeCAD).
+- `hardware/`: the custom carrier board with the camera sensor on it (KiCad) and the machined enclosure (FreeCAD).
 - `scripts/`: `bootstrap.sh` and `doctor.sh` for toolchain setup and checks.
 - `tools/versions.env`: pinned toolchain versions.
 - [`docs/`](docs/): [the plan](docs/PLAN.md), [stage specs](docs/stages/README.md) and [the legacy CPU docs](docs/legacy-cpu-pipeline.md).
@@ -119,10 +119,10 @@ The exact parts get confirmed in Stage 0b. The criteria, candidates and cost est
 - **Object detection:** built into every module, on the FPGA's DPU accelerator.
 - **Networking:** CAN-FD to SystemCore for tag corners; Gigabit Ethernet for NetworkTables, config, video and updates.
 - **Storage:** eMMC for the Linux image, config, network weights and the tag map (no SD card on the robot).
-- **Recording:** an M.2 2230 NVMe SSD in every module for video and logs.
-- **Size:** about a Limelight, roughly 3.5 × 2.5 × 1.5 in, in an aluminum housing machined on our own mill that is also the heatsink.
-- **Power:** robot 12 V through a buck-boost regulator that holds through brownouts, with a fuse/breaker on the PDH, following the current FRC game manual.
-- **Cost:** roughly $400–580 per module (estimate).
+- **Recording:** match video and logs on a data partition of the SOM's 16 GB eMMC; raw datasets stream over Ethernet (no SSD).
+- **Size:** about a Limelight, roughly 3.5 × 2.8 × 1.5 in, in an aluminum housing machined on our own mill that is also the heatsink.
+- **Power:** robot 12 V through a discrete buck-boost regulator that holds through brownouts, with a fuse/breaker on the PDH, following the current FRC game manual.
+- **Cost:** roughly $470–580 per module (estimate; target $400–580).
 
 ## Development setup
 
@@ -158,7 +158,7 @@ The full plan is in [docs/PLAN.md](docs/PLAN.md), with per-stage detail in [docs
 - [ ] **6**: Multiple modules: fusion and joint solves on the robot
 - [ ] **7**: Object detection (DPU) and object localization
 - [ ] **8**: TagSLAM field calibration
-- [ ] **9**: Module hardware: carrier and camera boards, machined enclosure, SSD and competition hardening
+- [ ] **9**: Module hardware: carrier board with the camera on it, machined enclosure and competition hardening
 
 ## Inspiration
 

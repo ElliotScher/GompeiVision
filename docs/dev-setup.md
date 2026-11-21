@@ -59,6 +59,13 @@ Doctor prints each tool's required and found version. It exits non-zero if a req
 
 `--selftest` builds [`tools/selftest/counter.sv`](../tools/selftest/counter.sv) with Verilator and runs its cocotb tests ([`test_counter.py`](../tools/selftest/test_counter.py)). If it passes, the simulation toolchain works end to end. You can also run it directly with `python tools/selftest/run.py`.
 
+Before pushing RTL, run the same checks CI runs (`.github/workflows/ci.yml`):
+
+```bash
+scripts/lint-rtl.sh        # Verible lint and format check (--fix reformats)
+scripts/run-sims.sh        # the self-test plus every sim/ testbench
+```
+
 ## AMD tools
 
 Vivado, Vitis and PetaLinux can't be redistributed, so bootstrap doesn't install them. They're **optional on student machines**: bitstreams build on the shared build machine, and most RTL work only needs Verilator and cocotb.

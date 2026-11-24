@@ -19,26 +19,36 @@
 //      54/64.
 //
 // Coordinates are pixel centers (x + 0.5, y + 0.5) of the thresholded image.
-// This model uses doubles. The RTL version's fixed-point widths come from the
-// error budget in Stage 4.
+// The model is in exact integers, as the RTL (rtl/quad/scorecard.sv) is:
+// differences of pixel centers are integers, so squared distances, cross
+// products and twice the quad's area are exact. Only the side lengths round:
+// each is floor(256 * length), an integer square root with 8 fractional bits.
+// They enter the off-quad limit (the mean side) and the fill check (the
+// perimeter), and every comparison is then cross-multiplied, so nothing else
+// rounds.
 #pragma once
 
 #include <array>
+#include <cstdint>
 #include <optional>
 
 #include "gv/model/components.h"
 
 namespace gv::model {
 
+// Integer forms, so the RTL can match bit for bit.
 struct QuadParams {
-  double merge_distance = 1.5;  // pixels
-  double max_outside = 2.0;     // pixels, or this fraction of the mean side if larger
-                                // (1.5 sent 18% of 20-40 px tags to 4C; 2.0 sends 4%):
-  double max_outside_frac = 0.05;
-  double min_fill = 0.25;       // blob area / quad area
-  double max_fill = 0.95;
-  double min_side = 8.0;  // pixels: a tag is 8 cells across, so it can't decode below this
+  int merge_distance_sq = 2;  // px^2: merge extremes up to 1.5 px apart (dx^2 + dy^2 <= 2)
+  int max_outside_q8 = 512;   // 2.0 px in 1/256 px, or the mean side / max_outside_div if larger
+                              // (1.5 px sent 18% of 20-40 px tags to 4C; 2.0 sends 4%)
+  int max_outside_div = 20;   // 5% of the mean side
+  int min_fill_pct = 25;      // blob area / quad area, in percent
+  int max_fill_pct = 95;
+  int min_side = 8;  // px: a tag is 8 cells across, so it can't decode below this
 };
+
+// floor(sqrt(v)), bit by bit as the RTL computes it.
+uint64_t isqrt(uint64_t v);
 
 enum class QuadVerdict { kOk, kTooFewCorners, kTooSmall, kExtremesOffQuad, kFillOutOfRange };
 

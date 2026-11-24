@@ -29,14 +29,33 @@
 #pragma once
 
 #include <array>
+#include <functional>
 #include <optional>
+#include <vector>
 
+#include "gv/model/fixed_point.h"
 #include "gv/model/image.h"
 #include "gv/model/quad.h"
 
 namespace gv::model {
 
 enum class WindowPolicy { kScaled, kFixed };
+
+// One edge's work for the PL edge sampler; the RPU computes it from the rough
+// quad (it needs a square root and a division) and fits lines to the result.
+// In fixed point: a and the sample points have coord_frac fractional bits,
+// d and n direction_frac, t0 coord_frac; spacing is 1.5 px.
+struct EdgeJob {
+  std::array<double, 2> a{};  // the edge's start corner
+  std::array<double, 2> d{};  // unit direction along the edge
+  std::array<double, 2> n{};  // unit outward normal
+  double t0 = 0;              // first sample's distance from a
+  double spacing = 1.5;       // between samples
+  int count = 0;              // samples
+  int half_steps = 0;         // the profile spans -half_steps..half_steps half-pixel steps
+  int window_steps = 0;       // the edge may lie at most this many half-pixel steps out
+  bool check_direction = true;
+};
 
 struct RefineParams {
   WindowPolicy window = WindowPolicy::kScaled;
@@ -54,6 +73,10 @@ struct RefineParams {
   // image decimated by f can be about f times further off, so the detector sets
   // this to window_max * f; later passes start close and use window_max.
   double first_pass_window_max = 0;
+  Quantization quant;  // fixed-point emulation (off by default)
+  // Called with every edge job and the edge points sampled for it (the RTL
+  // testbench's expected output).
+  const std::function<void(const EdgeJob&, const std::vector<std::array<double, 2>>&)>* trace = nullptr;
 };
 
 struct RefinedQuad {
@@ -61,6 +84,9 @@ struct RefinedQuad {
   std::array<int, 4> points_used{};                // per edge, after outlier rejection
   double window = 0;                               // px, as applied
 };
+
+// The PL edge sampler: the edge points found for one job.
+std::vector<std::array<double, 2>> sample_edge(const Image8& image, const EdgeJob& job, const Quantization& q = {});
 
 // `rough` is in full-resolution pixel coordinates (see to_full_resolution).
 std::optional<RefinedQuad> refine_quad(const Image8& image, const Quad& rough, const RefineParams& params = {});

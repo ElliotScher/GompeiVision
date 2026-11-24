@@ -64,7 +64,9 @@ target_include_directories(gv_model PUBLIC include)
 target_link_libraries(gv_model PUBLIC apriltag PRIVATE nlohmann_json::nlohmann_json)
 target_compile_options(gv_model PRIVATE ${GV_WARNINGS})
 
-add_executable(gv-model tools/gv_model.cpp)
+# The tool also renders synthetic tag scenes (tests/synth.cpp) for the RTL testbenches.
+add_executable(gv-model tools/gv_model.cpp tests/synth.cpp)
+target_include_directories(gv-model PRIVATE tests)
 target_link_libraries(gv-model PRIVATE gv_model)
 target_compile_options(gv-model PRIVATE ${GV_WARNINGS})
 
@@ -91,7 +93,8 @@ if(GV_MODEL_TESTS)
     tests/test_replay.cpp
     tests/test_tracer.cpp
     tests/test_pnp.cpp
-    tests/test_quad_options.cpp)
+    tests/test_quad_options.cpp
+    tests/test_fixed_point.cpp)
   target_link_libraries(gv_model_tests PRIVATE gv_model apriltag GTest::gtest_main)
   target_compile_options(gv_model_tests PRIVATE ${GV_WARNINGS})
   include(GoogleTest)

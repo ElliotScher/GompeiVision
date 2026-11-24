@@ -10,6 +10,7 @@
 #include <array>
 #include <vector>
 
+#include "gv/model/decode.h"
 #include "gv/model/image.h"
 #include "gv/model/quad.h"
 #include "gv/model/refine.h"
@@ -35,6 +36,8 @@ struct DetectorParams {
   // took 20-40 px tags from 230 to 235 of 240 found, at no extra refinements.
   double quick_decode_grow = 1.0;
   bool use_4c = true;
+  Quantization quant;  // fixed-point emulation for refinement and decode (off by default)
+  const DecodeTrace* decode_trace = nullptr;  // every code read (quick and final), for testbenches
   TracerParams tracer;
 };
 

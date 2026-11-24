@@ -66,6 +66,9 @@ class Tag36h11Lookup {
   }
   size_t max_bucket_size() const;
 
+  // Bits (as cells) that touch bit k's cell, 8-connected: errors_connected's table.
+  uint64_t near_mask(int bit) const { return near_[static_cast<size_t>(bit)]; }
+
   // Each bit's cell, in data-grid coordinates (AprilTag's bit_x, bit_y).
   int cell_x(int bit) const { return cell_x_[static_cast<size_t>(bit)]; }
   int cell_y(int bit) const { return cell_y_[static_cast<size_t>(bit)]; }

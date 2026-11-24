@@ -12,7 +12,7 @@ namespace {
 
 std::optional<TagMatch> decode_quad(const Image8& im, const std::array<std::array<double, 2>, 4>& q,
                                     const Tag36h11Lookup& family, const DetectorParams& p, double* margin) {
-  const auto read = read_code(im, q, family, p.sharpening);
+  const auto read = read_code(im, q, family, p.sharpening, p.quant, p.decode_trace);
   if (!read) return std::nullopt;
   if (margin) *margin = read->decision_margin;
   return family.decode(read->code, p.max_hamming);
@@ -29,6 +29,7 @@ class Finisher {
       : image_(image), family_(family), p_(p), st_(st), rp_(p.refine) {
     rp_.passes = p.refine_passes > 0 ? p.refine_passes : (p.decimate > 1 ? 2 : 1);
     if (p.decimate > 1 && rp_.first_pass_window_max <= 0) rp_.first_pass_window_max = rp_.window_max * p.decimate;
+    if (p.quant.enabled()) rp_.quant = p.quant;
   }
 
   void operator()(Quad small_quad, bool from_4c) {

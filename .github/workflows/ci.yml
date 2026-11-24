@@ -2,7 +2,7 @@
 # - hardware: Verible lint and format check, then the Verilator + cocotb sims
 #   (scripts/lint-rtl.sh, scripts/run-sims.sh), with the toolchain installed by
 #   bootstrap.sh and cached between runs.
-# - model, apu: CMake build and ctest, once each folder has a CMakeLists.txt.
+# - model, rpu, apu: CMake build and ctest, once each folder has a CMakeLists.txt.
 # - robot: Gradle tests, once robot/ has a Gradle build.
 # Jobs for folders that are still README stubs pass with a note, so this
 # workflow is green from day one and starts checking code as soon as it lands.
@@ -48,7 +48,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        dir: [model, apu]
+        dir: [model, rpu, apu]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Skip while ${{ matrix.dir }}/ has no CMakeLists.txt

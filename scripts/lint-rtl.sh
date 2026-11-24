@@ -32,13 +32,18 @@ status=0
 verible-verilog-lint "${files[@]}" || status=1
 if ((FIX)); then
   verible-verilog-format --inplace "${files[@]}"
-elif ! verible-verilog-format --verify "${files[@]}" >/dev/null 2>&1; then
-  err "formatting differs from verible-verilog-format in:"
+else
+  # --verify takes one file at a time (Verible wants --inplace for several).
+  unformatted=()
   for f in "${files[@]}"; do
-    verible-verilog-format --verify "$f" >/dev/null 2>&1 || printf '  %s\n' "$f" >&2
+    verible-verilog-format --verify "$f" >/dev/null 2>&1 || unformatted+=("$f")
   done
-  err "fix with: scripts/lint-rtl.sh --fix"
-  status=1
+  if ((${#unformatted[@]})); then
+    err "formatting differs from verible-verilog-format in:"
+    printf '  %s\n' "${unformatted[@]}" >&2
+    err "fix with: scripts/lint-rtl.sh --fix"
+    status=1
+  fi
 fi
 ((status)) || info "lint-rtl: ${#files[@]} file(s) clean"
 exit "$status"
